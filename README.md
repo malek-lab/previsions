@@ -92,5 +92,4 @@ L'app est accessible sur http://localhost:8501.
     ├── Serta_logo.jpg      # logo affiche dans la sidebar
     ├── README.md           # cette documentation
     └── .gitignore          # fichiers exclus du depot
-
-"@ | Out-File -FilePath README.md -Encoding utf8
+@ | Out-File -FilePath README.md -Encoding utf8
