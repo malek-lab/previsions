@@ -6,7 +6,7 @@ Interface de visualisation et ventilation des besoins clients.
 <img src="images/Interface2.png" alt="Logo" 
      style="max-width:100%; height:auto; display:block;">
 
-<img src="images/interface1.png" alt="Logo" 
+<img src="schema_donnees.svg" alt="Logo" 
      style="max-width:100%; height:auto; display:block;">
 
 
