@@ -1,0 +1,156 @@
+<svg viewBox="0 0 900 620" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Arial, sans-serif">
+
+  <!-- Fond -->
+  <rect width="900" height="620" fill="#F8F9FA" rx="12"/>
+
+  <!-- Titre -->
+  <text x="450" y="35" text-anchor="middle" font-size="18" font-weight="bold" fill="#1F4E79">Schéma de données — Application PIC Streamlit</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- SOURCES DE DONNÉES (colonne gauche) -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- Source 1 : Procédure SQL -->
+  <rect x="30" y="70" width="190" height="80" rx="8" fill="#1F4E79" stroke="#0D2B4E" stroke-width="1.5"/>
+  <text x="125" y="100" text-anchor="middle" font-size="12" font-weight="bold" fill="white">📊 Procédure SQL</text>
+  <text x="125" y="118" text-anchor="middle" font-size="10" fill="#BDD7EE">P_FPC_VENTILATION</text>
+  <text x="125" y="134" text-anchor="middle" font-size="10" fill="#BDD7EE">SRV-MSSQLDB</text>
+
+  <!-- Source 2 : V_SUPPLY_CHAIN -->
+  <rect x="30" y="270" width="190" height="80" rx="8" fill="#C00000" stroke="#8B0000" stroke-width="1.5"/>
+  <text x="125" y="300" text-anchor="middle" font-size="12" font-weight="bold" fill="white">📦 V_SUPPLY_CHAIN</text>
+  <text x="125" y="318" text-anchor="middle" font-size="10" fill="#FFB3B3">Carnet de commande</text>
+  <text x="125" y="334" text-anchor="middle" font-size="10" fill="#FFB3B3">DW25 via OPENQUERY</text>
+
+  <!-- Source 3 : V_NOUVEAUX_PROJETS -->
+  <rect x="30" y="460" width="190" height="80" rx="8" fill="#375623" stroke="#1E3A12" stroke-width="1.5"/>
+  <text x="125" y="490" text-anchor="middle" font-size="12" font-weight="bold" fill="white">🚀 V_NOUVEAUX_PROJETS</text>
+  <text x="125" y="508" text-anchor="middle" font-size="10" fill="#C6EFCE">Nouveaux projets PIC</text>
+  <text x="125" y="524" text-anchor="middle" font-size="10" fill="#C6EFCE">DW25 via OPENQUERY</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- PAGES (colonne centre) -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- Page 01 -->
+  <rect x="310" y="70" width="200" height="80" rx="8" fill="#2E75B6" stroke="#1F4E79" stroke-width="1.5"/>
+  <text x="410" y="100" text-anchor="middle" font-size="12" font-weight="bold" fill="white">Page 01</text>
+  <text x="410" y="118" text-anchor="middle" font-size="11" fill="#DDEEFF">📊 Pivot Prévision</text>
+  <text x="410" y="136" text-anchor="middle" font-size="10" fill="#BDD7EE">→ session_state[df_pivot]</text>
+
+  <!-- Page 02 -->
+  <rect x="310" y="180" width="200" height="60" rx="8" fill="#7030A0" stroke="#4B0082" stroke-width="1.5"/>
+  <text x="410" y="205" text-anchor="middle" font-size="12" font-weight="bold" fill="white">Page 02</text>
+  <text x="410" y="223" text-anchor="middle" font-size="11" fill="#E8D5FF">📋 Supply Chain (lecture)</text>
+
+  <!-- Page 03 -->
+  <rect x="310" y="270" width="200" height="80" rx="8" fill="#2E75B6" stroke="#1F4E79" stroke-width="1.5"/>
+  <text x="410" y="300" text-anchor="middle" font-size="12" font-weight="bold" fill="white">Page 03</text>
+  <text x="410" y="318" text-anchor="middle" font-size="11" fill="#DDEEFF">📦 Agrégation</text>
+  <text x="410" y="336" text-anchor="middle" font-size="10" fill="#BDD7EE">→ session_state[df_03]</text>
+
+  <!-- Page 05 -->
+  <rect x="310" y="390" width="200" height="80" rx="8" fill="#375623" stroke="#1E3A12" stroke-width="1.5"/>
+  <text x="410" y="420" text-anchor="middle" font-size="12" font-weight="bold" fill="white">Page 05</text>
+  <text x="410" y="438" text-anchor="middle" font-size="11" fill="#C6EFCE">🚀 Nouveaux Projets</text>
+  <text x="410" y="456" text-anchor="middle" font-size="10" fill="#C6EFCE">→ session_state[df_projets]</text>
+
+  <!-- Page 04 -->
+  <rect x="310" y="500" width="200" height="80" rx="8" fill="#1F4E79" stroke="#0D2B4E" stroke-width="1.5"/>
+  <text x="410" y="530" text-anchor="middle" font-size="12" font-weight="bold" fill="white">Page 04</text>
+  <text x="410" y="548" text-anchor="middle" font-size="11" fill="#DDEEFF">📊 Consolidée</text>
+  <text x="410" y="566" text-anchor="middle" font-size="10" fill="#BDD7EE">Somme par REF_SERTA</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- OUTPUT (colonne droite) -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- Export Excel -->
+  <rect x="660" y="500" width="200" height="80" rx="8" fill="#375623" stroke="#1E3A12" stroke-width="1.5"/>
+  <text x="760" y="530" text-anchor="middle" font-size="12" font-weight="bold" fill="white">💾 Export Final</text>
+  <text x="760" y="550" text-anchor="middle" font-size="11" fill="#C6EFCE">Excel / CSV</text>
+  <text x="760" y="568" text-anchor="middle" font-size="10" fill="#C6EFCE">3 sources consolidées</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- FLÈCHES Sources → Pages -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- Procédure → Page 01 -->
+  <line x1="220" y1="110" x2="308" y2="110" stroke="#1F4E79" stroke-width="2" marker-end="url(#arrow-blue)"/>
+
+  <!-- V_SUPPLY_CHAIN → Page 02 -->
+  <line x1="220" y1="295" x2="308" y2="210" stroke="#7030A0" stroke-width="2" marker-end="url(#arrow-purple)"/>
+
+  <!-- V_SUPPLY_CHAIN → Page 03 -->
+  <line x1="220" y1="315" x2="308" y2="315" stroke="#C00000" stroke-width="2" marker-end="url(#arrow-red)"/>
+
+  <!-- V_NOUVEAUX_PROJETS → Page 05 -->
+  <line x1="220" y1="500" x2="308" y2="450" stroke="#375623" stroke-width="2" marker-end="url(#arrow-green)"/>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- FLÈCHES Pages → Pages (session_state) -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- Page 01 → Page 03 (df_pivot) -->
+  <path d="M410 150 L410 268" stroke="#2E75B6" stroke-width="2" stroke-dasharray="6,3" fill="none" marker-end="url(#arrow-blue)"/>
+  <text x="420" y="215" font-size="9" fill="#2E75B6">df_pivot</text>
+
+  <!-- Page 03 → Page 04 (df_03) -->
+  <path d="M460 350 Q530 430 460 498" stroke="#2E75B6" stroke-width="2" stroke-dasharray="6,3" fill="none" marker-end="url(#arrow-blue)"/>
+  <text x="540" y="430" font-size="9" fill="#2E75B6">df_03</text>
+
+  <!-- Page 05 → Page 04 (df_projets) -->
+  <path d="M410 470 L410 498" stroke="#375623" stroke-width="2" stroke-dasharray="6,3" fill="none" marker-end="url(#arrow-green)"/>
+  <text x="420" y="490" font-size="9" fill="#375623">df_projets</text>
+
+  <!-- Page 04 → Export -->
+  <line x1="510" y1="540" x2="658" y2="540" stroke="#1F4E79" stroke-width="2" marker-end="url(#arrow-blue)"/>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- SESSION STATE labels -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <rect x="550" y="60" width="300" height="130" rx="8" fill="white" stroke="#CCCCCC" stroke-width="1" stroke-dasharray="4,2"/>
+  <text x="700" y="82" text-anchor="middle" font-size="11" font-weight="bold" fill="#555">🗂 session_state (mémoire partagée)</text>
+  <text x="570" y="102" font-size="10" fill="#1F4E79">df_pivot   →  résultat page 01 (LPC ventilé)</text>
+  <text x="570" y="120" font-size="10" fill="#C00000">df_03      →  LPC + Carnet (page 03)</text>
+  <text x="570" y="138" font-size="10" fill="#375623">df_projets →  nouveaux projets (page 05)</text>
+  <text x="570" y="156" font-size="10" fill="#1F4E79">df_04      →  consolidée finale (page 04)</text>
+  <text x="570" y="174" font-size="10" fill="#555">date_prevision, date_filtre_du/au</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- LÉGENDE ORIGINES -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <rect x="550" y="220" width="300" height="100" rx="8" fill="white" stroke="#CCCCCC" stroke-width="1" stroke-dasharray="4,2"/>
+  <text x="700" y="242" text-anchor="middle" font-size="11" font-weight="bold" fill="#555">🏷 Colonne ORIGINE dans df_03 / df_04</text>
+  <rect x="568" y="255" width="12" height="12" fill="#1F4E79" rx="2"/>
+  <text x="588" y="265" font-size="10" fill="#333">LPC       — prévisions programmes (page 01)</text>
+  <rect x="568" y="275" width="12" height="12" fill="#C00000" rx="2"/>
+  <text x="588" y="285" font-size="10" fill="#333">CARNET  — commandes fermes (page 03)</text>
+  <rect x="568" y="295" width="12" height="12" fill="#375623" rx="2"/>
+  <text x="588" y="305" font-size="10" fill="#333">PROJET   — nouveaux projets PIC (page 05)</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- NUMÉRO D'ORDRE -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <text x="450" y="590" text-anchor="middle" font-size="10" fill="#888">
+    Ordre d'exécution : Page 01 → Page 03 (charger carnet) → Page 05 (charger projets) → Page 04 (export final)
+  </text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- MARQUEURS FLÈCHES -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <defs>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#1F4E79"/>
+    </marker>
+    <marker id="arrow-red" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#C00000"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#375623"/>
+    </marker>
+    <marker id="arrow-purple" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#7030A0"/>
+    </marker>
+  </defs>
+</svg>
