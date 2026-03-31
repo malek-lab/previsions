@@ -1,0 +1,242 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+from datetime import datetime
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+from shared import get_engine, logo_sidebar, wk_cols_from_df, to_excel_bytes
+
+st.title("📊 Consolidée — Somme par Référence")
+
+if get_engine() is None:
+    st.stop()
+
+# ── Sidebar minimal ───────────────────────────────────────────────────────────
+with st.sidebar:
+    logo_sidebar()
+    st.header("⚙️ Info")
+    st.markdown("---")
+    st.info(
+        "Cette page consolide les données de la page **Agrégation**.\n\n"
+        "Elle fait la somme des quantités par `REF_ARTICLE_SERTA` "
+        "(tous clients et toutes origines confondus).\n\n"
+        "👈 Lancez d'abord la page **Agrégation** pour alimenter cette vue."
+    )
+
+# ── Vérifier que df_03 existe ─────────────────────────────────────────────────
+if 'df_03' not in st.session_state:
+    st.warning("⚠️ Aucune donnée — lancez d'abord la page **📦 Agrégation** et cliquez sur **LANCER**.")
+    st.stop()
+
+df_src = st.session_state['df_03'].copy()
+
+# ── Colonnes méta et semaines ─────────────────────────────────────────────────
+META_SRC = ['CODE_CLIENT', 'REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT', 'ORIGINE',
+            'PROGRAMME', 'HORIZON_PROGRAMME', 'UP_PRINCIPALE', 'CODE_SELECTION',
+            'QTE_UC', 'QTE_MOQ', 'QTE_TOTALE',
+            'SERTA_SO_CLIENT_GROUP_NAME', 'SERTA_SO_CLIENT_NAME', 'SALES_ADMINISTRATION_PERSON']
+META_SRC = [c for c in META_SRC if c in df_src.columns]
+wk_cols_src = [c for c in df_src.columns if c not in META_SRC
+               and isinstance(c, str) and len(c) == 6 and c[0] == 'S' and c[3] == '-']
+wk_cols_src = sorted(wk_cols_src)
+
+# ── Colonnes méta à garder dans la consolidée (une ligne par ref) ─────────────
+# Priorité LPC pour les colonnes enrichissement
+META_CONSOLIDE = ['REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT', 'UP_PRINCIPALE',
+                  'CODE_SELECTION', 'QTE_MOQ', 'QTE_UC', 'PROGRAMME', 'HORIZON_PROGRAMME']
+META_CONSOLIDE = [c for c in META_CONSOLIDE if c in df_src.columns]
+
+# ── Construction consolidée ───────────────────────────────────────────────────
+@st.cache_data
+def consolider(df_src_json, wk_cols):
+    import io
+    df = pd.read_json(io.StringIO(df_src_json), orient='split')
+
+    # Pour les colonnes méta : prendre la valeur LPC si dispo, sinon CARNET
+    # On trie pour avoir LPC en premier
+    _ordre = {'LPC': 0, 'CARNET': 1, 'PROJET': 2}
+    df['_ord'] = df['ORIGINE'].map(_ordre).fillna(3)
+    df_sorted = df.sort_values('_ord')
+    df = df.drop(columns=['_ord'])
+
+    meta_agg = {}
+    for col in ['REF_ARTICLE_CLIENT', 'UP_PRINCIPALE', 'CODE_SELECTION',
+                'QTE_MOQ', 'QTE_UC', 'PROGRAMME', 'HORIZON_PROGRAMME']:
+        if col not in df.columns:
+            continue
+        meta_agg[col] = df_sorted[df_sorted[col].astype(str).str.strip() != ''].groupby(
+            'REF_ARTICLE_SERTA')[col].first()
+
+    # ORIGINE : règle métier
+    # - une seule source → afficher les valeurs (programmes, CARNET, PROJET)
+    # - plusieurs sources mélangées → vide
+    if 'ORIGINE' in df.columns:
+        def calc_origine(grp):
+            origines = set(grp['ORIGINE'].dropna().astype(str).str.strip().unique()) - {'', 'nan'}
+            if not origines: return ''
+            if len(origines) == 1: return list(origines)[0]
+            return ' / '.join(sorted(origines))
+        origine_map = df.groupby('REF_ARTICLE_SERTA').apply(calc_origine, include_groups=False)
+    else:
+        origine_map = None
+
+    # Somme des semaines par ref
+    wk_present = [c for c in wk_cols if c in df.columns]
+    for c in wk_present:
+        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+
+    pivot = df.groupby('REF_ARTICLE_SERTA')[wk_present].sum().reset_index()
+
+    # Ajouter les colonnes méta
+    for col, serie in meta_agg.items():
+        pivot[col] = pivot['REF_ARTICLE_SERTA'].map(serie).fillna('')
+    if origine_map is not None:
+        pivot['ORIGINE'] = pivot['REF_ARTICLE_SERTA'].map(origine_map).fillna('')
+
+    # Réordonner colonnes
+    meta_cols = ['REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT', 'ORIGINE', 'UP_PRINCIPALE',
+                 'CODE_SELECTION', 'QTE_MOQ', 'QTE_UC', 'PROGRAMME', 'HORIZON_PROGRAMME']
+    meta_cols = [c for c in meta_cols if c in pivot.columns]
+    wk_sorted = sorted([c for c in pivot.columns if c not in meta_cols
+                        and isinstance(c, str) and len(c) == 6 and c[0] == 'S' and c[3] == '-'])
+    return pivot[meta_cols + wk_sorted]
+
+df = consolider(df_src.to_json(orient='split'), wk_cols_src)
+
+# ── Intégration nouveaux projets depuis page 05 ───────────────────────────────
+if 'df_projets_a_integrer' in st.session_state:
+    df_proj = st.session_state['df_projets_a_integrer'].copy()
+    nb_proj = len(df_proj)
+
+    df = pd.concat([df, df_proj], ignore_index=True, sort=False)
+
+    wk_all = sorted([c for c in df.columns
+                     if isinstance(c, str) and len(c) == 6 and c[0] == 'S' and c[3] == '-'])
+    for col_wk in wk_all:
+        df[col_wk] = pd.to_numeric(df[col_wk], errors='coerce').fillna(0)
+    for col_txt in ['PROGRAMME', 'CODE_SELECTION', 'ORIGINE', 'UP_PRINCIPALE',
+                    'REF_ARTICLE_CLIENT', 'HORIZON_PROGRAMME']:
+        if col_txt in df.columns:
+            df[col_txt] = df[col_txt].fillna('').astype(str)
+
+    # Re-consolider : sommer semaines + fusionner origines
+    def _calc_orig(grp):
+        origs = set(grp['ORIGINE'].str.strip().unique()) - {'', 'nan'}
+        if not origs: return ''
+        if len(origs) == 1: return list(origs)[0]
+        return ' / '.join(sorted(origs))
+    orig_map = df.groupby('REF_ARTICLE_SERTA').apply(_calc_orig, include_groups=False)
+
+    ordre_orig = {'LPC': 0, 'CARNET': 1, 'PROJET': 2}
+    df['_ord'] = df['ORIGINE'].map(ordre_orig).fillna(3)
+    df_sorted2 = df.sort_values('_ord').drop(columns=['_ord'])
+    df = df.drop(columns=['_ord'])
+
+    meta_cols2 = [c for c in df.columns if c not in wk_all and c != 'REF_ARTICLE_SERTA']
+    meta_agg2  = {}
+    for col in meta_cols2:
+        if col == 'ORIGINE': continue
+        meta_agg2[col] = df_sorted2[df_sorted2[col].astype(str).str.strip() != ''].groupby(
+            'REF_ARTICLE_SERTA')[col].first()
+
+    df_wk = df.groupby('REF_ARTICLE_SERTA')[wk_all].sum().reset_index()
+    for col, serie in meta_agg2.items():
+        df_wk[col] = df_wk['REF_ARTICLE_SERTA'].map(serie).fillna('')
+    df_wk['ORIGINE'] = df_wk['REF_ARTICLE_SERTA'].map(orig_map).fillna('')
+
+    meta_ordre = ['REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT', 'ORIGINE', 'UP_PRINCIPALE',
+                  'CODE_SELECTION', 'QTE_MOQ', 'QTE_UC', 'PROGRAMME', 'HORIZON_PROGRAMME']
+    meta_pres  = [c for c in meta_ordre if c in df_wk.columns]
+    autres     = [c for c in df_wk.columns if c not in meta_pres and c not in wk_all]
+    df = df_wk[meta_pres + autres + wk_all]
+
+    st.success(f"✅ {nb_proj} projet(s) intégrés depuis la page Nouveaux Projets")
+
+# wk_cols : filtre positif strict
+wk_cols = wk_cols_from_df(df)
+for _c in wk_cols:
+    df[_c] = pd.to_numeric(df[_c], errors='coerce').fillna(0)
+
+import datetime as _dt
+_fdu = st.session_state.get('date_prevision', None)
+_fau = st.session_state.get('date_filtre_au', None)
+def _wk_ok(col):
+    try:
+        yy, ww = int('20'+col[1:3]), int(col[4:6])
+        d = _dt.date.fromisocalendar(yy, ww, 1)
+        if _fdu and d < _fdu: return False
+        if _fau and d > _fau: return False
+        return True
+    except:
+        return True
+wk_cols = [c for c in wk_cols if _wk_ok(c)]
+
+# ── Métriques ─────────────────────────────────────────────────────────────────
+nb_lpc    = df_src[df_src['ORIGINE'] == 'LPC']['REF_ARTICLE_SERTA'].nunique()
+nb_carnet = df_src[df_src['ORIGINE'] == 'CARNET']['REF_ARTICLE_SERTA'].nunique()
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Refs totales",  len(df))
+c2.metric("dont LPC",      nb_lpc)
+c3.metric("dont CARNET",   nb_carnet)
+c4.metric("Semaines",      len(wk_cols))
+if wk_cols:
+    st.caption(f"📅 {wk_cols[0]} → {wk_cols[-1]}")
+
+st.markdown("---")
+
+# ── Filtres ───────────────────────────────────────────────────────────────────
+with st.expander("🔍 Filtres", expanded=False):
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        f_ref  = st.multiselect("Ref SERTA",
+            options=sorted(df['REF_ARTICLE_SERTA'].dropna().astype(str).unique()))
+    with col2:
+        f_up   = st.multiselect("UP",
+            options=sorted(df['UP_PRINCIPALE'].dropna().replace('', None).dropna().astype(str).unique())
+            if 'UP_PRINCIPALE' in df.columns else [])
+    with col3:
+        f_prog = st.multiselect("Programme client",
+            options=sorted(df['PROGRAMME'].dropna().replace('', None).dropna().astype(str).unique())
+            if 'PROGRAMME' in df.columns else [])
+    with col4:
+        f_origine = st.multiselect("Origine",
+            options=sorted(df['ORIGINE'].dropna().replace('', None).dropna().astype(str).unique())
+            if 'ORIGINE' in df.columns else [])
+
+df_disp = df.copy()
+if f_ref:     df_disp = df_disp[df_disp['REF_ARTICLE_SERTA'].astype(str).isin(f_ref)]
+if f_up:      df_disp = df_disp[df_disp['UP_PRINCIPALE'].astype(str).isin(f_up)]
+if f_prog:    df_disp = df_disp[df_disp['PROGRAMME'].astype(str).isin(f_prog)]
+if f_origine: df_disp = df_disp[df_disp['ORIGINE'].astype(str).isin(f_origine)]
+
+# ── Tabs ──────────────────────────────────────────────────────────────────────
+tab1, tab2, tab3 = st.tabs(["📋 Tableau pivot", "📈 Graphique", "💾 Export"])
+
+with tab1:
+    col_cfg = {wk: st.column_config.NumberColumn(wk, format="%d") for wk in wk_cols}
+    st.caption(f"{len(df_disp):,} lignes")
+    st.dataframe(df_disp, width='stretch', height=600, column_config=col_cfg)
+
+with tab2:
+    if wk_cols:
+        totals = df_disp[wk_cols].sum()
+        fig = px.bar(x=totals.index, y=totals.values,
+                     title="QTY totale consolidée par semaine (LPC + Carnet)",
+                     labels={'x': 'Semaine', 'y': 'QTY'},
+                     color_discrete_sequence=['#1F4E79'])
+        st.plotly_chart(fig, width="stretch")
+
+with tab3:
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button("📥 CSV",
+            data=df_disp.to_csv(index=False, encoding='utf-8-sig', sep=';'),
+            file_name=f"consolide_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv", width="stretch")
+    with c2:
+        st.download_button("📥 Excel",
+            data=to_excel_bytes(df_disp),
+            file_name=f"consolide_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            width="stretch")
