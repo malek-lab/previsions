@@ -85,6 +85,11 @@ def transformer_fichier(df_raw):
     # Renommer colonnes méta
     df = df.rename(columns={k: v for k, v in META_RENAME.items() if k in df.columns})
 
+    # Forcer tout en string pour éviter la perte des zéros (0081 → 81)
+    for col_str in ['CODE_CLIENT', 'REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT']:
+        if col_str in df.columns:
+            df[col_str] = df[col_str].astype(str).str.strip().replace('nan', '')
+
     # Vérifier colonnes obligatoires
     if 'CODE_CLIENT' not in df.columns:
         raise ValueError("Colonne 'Programme' introuvable — vérifiez le format du fichier")
@@ -142,7 +147,7 @@ if uploaded_files:
         errors = []
         for f in uploaded_files:
             try:
-                df_raw = pd.read_excel(f, header=0)
+                df_raw = pd.read_excel(f, header=0, dtype=str)
                 df_t, _ = transformer_fichier(df_raw)
                 df_t['_SOURCE_FICHIER'] = f.name
                 frames.append(df_t)
