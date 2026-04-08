@@ -79,12 +79,26 @@ else:
 
 df_lpc['ORIGINE'] = 'LPC'
 
+# ── Intégrer programmes manuels (hors Lasernet) ───────────────────────────────
+if 'df_manuels' in st.session_state:
+    df_manuels = st.session_state['df_manuels'].copy()
+    # Aligner colonnes semaines avec LPC
+    df_lpc = pd.concat([df_lpc, df_manuels], ignore_index=True, sort=False)
+    wk_all_lpc = wk_cols_from_df(df_lpc)
+    for c in wk_all_lpc:
+        df_lpc[c] = pd.to_numeric(df_lpc[c], errors='coerce').fillna(0)
+    for col in ['PROGRAMME', 'CODE_CLIENT', 'ORIGINE', 'CODE_SELECTION']:
+        if col in df_lpc.columns:
+            df_lpc[col] = df_lpc[col].fillna('').astype(str)
+    nb_manuels = len(df_manuels)
+    st.info(f"📂 {nb_manuels} programme(s) manuel(s) intégrés depuis la page Import")
+
 # Colonnes méta LPC disponibles
 META_LPC_COLS = ['CODE_CLIENT', 'ORIGINE', 'PROGRAMME', 'REF_ARTICLE_SERTA',
                  'REF_ARTICLE_CLIENT', 'UP_PRINCIPALE', 'CODE_SELECTION',
                  'QTE_UC', 'QTE_MOQ', 'QTE_TOTALE']
 
-# Construire les couples LPC pour filtrer le carnet
+# Construire les couples LPC + MANUELS pour filtrer le carnet
 couples_lpc = set(
     df_lpc['CODE_CLIENT'].astype(str).str.strip() + '|' + df_lpc['REF_ARTICLE_SERTA'].astype(str).str.strip()
 )
