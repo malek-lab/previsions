@@ -54,10 +54,7 @@ def consolider(df_src_json, wk_cols):
 
     # Pour les colonnes méta : prendre la valeur LPC si dispo, sinon CARNET
     # On trie pour avoir LPC en premier
-    _ordre = {'LPC': 0, 'CARNET': 1, 'PROJET': 2}
-    df['_ord'] = df['ORIGINE'].map(_ordre).fillna(3)
-    df_sorted = df.sort_values('_ord')
-    df = df.drop(columns=['_ord'])
+    df_sorted = df.sort_values('ORIGINE', ascending=False)  # LPC avant CARNET
 
     meta_agg = {}
     for col in ['REF_ARTICLE_CLIENT', 'UP_PRINCIPALE', 'CODE_SELECTION',
@@ -71,12 +68,14 @@ def consolider(df_src_json, wk_cols):
     # - une seule source → afficher les valeurs (programmes, CARNET, PROJET)
     # - plusieurs sources mélangées → vide
     if 'ORIGINE' in df.columns:
-        def calc_origine(grp):
-            origines = set(grp['ORIGINE'].dropna().astype(str).str.strip().unique()) - {'', 'nan'}
-            if not origines: return ''
-            if len(origines) == 1: return list(origines)[0]
-            return ' / '.join(sorted(origines))
-        origine_map = df.groupby('REF_ARTICLE_SERTA').apply(calc_origine, include_groups=False)
+        ORDRE = ['LPC', 'CARNET', 'PROJET']
+        def calc_origine(series):
+            origines = set(series.dropna().astype(str).str.strip().unique()) - {''}
+            if not origines:
+                return ''
+            triees = [o for o in ORDRE if o in origines]
+            return '/'.join(triees) if triees else '/'.join(sorted(origines))
+        origine_map = df.groupby('REF_ARTICLE_SERTA')['ORIGINE'].apply(calc_origine)
     else:
         origine_map = None
 
@@ -87,11 +86,18 @@ def consolider(df_src_json, wk_cols):
 
     pivot = df.groupby('REF_ARTICLE_SERTA')[wk_present].sum().reset_index()
 
+    NUM_COLS = {'QTE_MOQ', 'QTE_UC', 'QTE_TOTALE'}
     # Ajouter les colonnes méta
     for col, serie in meta_agg.items():
-        pivot[col] = pivot['REF_ARTICLE_SERTA'].map(serie).fillna('')
+        mapped = pivot['REF_ARTICLE_SERTA'].map(serie)
+        if col in NUM_COLS:
+            pivot[col] = pd.to_numeric(mapped, errors='coerce').fillna(0)
+        else:
+            pivot[col] = mapped.where(mapped.notna(), '').astype(str)
     if origine_map is not None:
-        pivot['ORIGINE'] = pivot['REF_ARTICLE_SERTA'].map(origine_map).fillna('')
+        pivot['ORIGINE'] = pivot['REF_ARTICLE_SERTA'].map(origine_map).where(
+            pivot['REF_ARTICLE_SERTA'].map(origine_map).notna(), '').astype(str)
+    pivot['DOUBLON'] = False
 
     # Réordonner colonnes
     meta_cols = ['REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT', 'ORIGINE', 'UP_PRINCIPALE',
@@ -107,55 +113,18 @@ df = consolider(df_src.to_json(orient='split'), wk_cols_src)
 if 'df_projets_a_integrer' in st.session_state:
     df_proj = st.session_state['df_projets_a_integrer'].copy()
     nb_proj = len(df_proj)
-
     df = pd.concat([df, df_proj], ignore_index=True, sort=False)
-
     wk_all = sorted([c for c in df.columns
                      if isinstance(c, str) and len(c) == 6 and c[0] == 'S' and c[3] == '-'])
     for col_wk in wk_all:
         df[col_wk] = pd.to_numeric(df[col_wk], errors='coerce').fillna(0)
-    for col_txt in ['PROGRAMME', 'CODE_SELECTION', 'ORIGINE', 'UP_PRINCIPALE',
-                    'REF_ARTICLE_CLIENT', 'HORIZON_PROGRAMME']:
+    for col_txt in ['PROGRAMME', 'CODE_SELECTION', 'ORIGINE']:
         if col_txt in df.columns:
             df[col_txt] = df[col_txt].fillna('').astype(str)
-
-    # Re-consolider : sommer semaines + fusionner origines
-    def _calc_orig(grp):
-        origs = set(grp['ORIGINE'].str.strip().unique()) - {'', 'nan'}
-        if not origs: return ''
-        if len(origs) == 1: return list(origs)[0]
-        return ' / '.join(sorted(origs))
-    orig_map = df.groupby('REF_ARTICLE_SERTA').apply(_calc_orig, include_groups=False)
-
-    ordre_orig = {'LPC': 0, 'CARNET': 1, 'PROJET': 2}
-    df['_ord'] = df['ORIGINE'].map(ordre_orig).fillna(3)
-    df_sorted2 = df.sort_values('_ord').drop(columns=['_ord'])
-    df = df.drop(columns=['_ord'])
-
-    meta_cols2 = [c for c in df.columns if c not in wk_all and c != 'REF_ARTICLE_SERTA']
-    meta_agg2  = {}
-    for col in meta_cols2:
-        if col == 'ORIGINE': continue
-        meta_agg2[col] = df_sorted2[df_sorted2[col].astype(str).str.strip() != ''].groupby(
-            'REF_ARTICLE_SERTA')[col].first()
-
-    df_wk = df.groupby('REF_ARTICLE_SERTA')[wk_all].sum().reset_index()
-    for col, serie in meta_agg2.items():
-        df_wk[col] = df_wk['REF_ARTICLE_SERTA'].map(serie).fillna('')
-    df_wk['ORIGINE'] = df_wk['REF_ARTICLE_SERTA'].map(orig_map).fillna('')
-
-    meta_ordre = ['REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT', 'ORIGINE', 'UP_PRINCIPALE',
-                  'CODE_SELECTION', 'QTE_MOQ', 'QTE_UC', 'PROGRAMME', 'HORIZON_PROGRAMME']
-    meta_pres  = [c for c in meta_ordre if c in df_wk.columns]
-    autres     = [c for c in df_wk.columns if c not in meta_pres and c not in wk_all]
-    df = df_wk[meta_pres + autres + wk_all]
-
     st.success(f"✅ {nb_proj} projet(s) intégrés depuis la page Nouveaux Projets")
 
-# wk_cols : filtre positif strict
-wk_cols = wk_cols_from_df(df)
-for _c in wk_cols:
-    df[_c] = pd.to_numeric(df[_c], errors='coerce').fillna(0)
+wk_cols = [c for c in df.columns if c not in ['REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT',
+            'UP_PRINCIPALE', 'CODE_SELECTION', 'QTE_MOQ', 'QTE_UC', 'PROGRAMME', 'HORIZON_PROGRAMME']]
 
 import datetime as _dt
 _fdu = st.session_state.get('date_prevision', None)
@@ -187,7 +156,7 @@ st.markdown("---")
 
 # ── Filtres ───────────────────────────────────────────────────────────────────
 with st.expander("🔍 Filtres", expanded=False):
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     with col1:
         f_ref  = st.multiselect("Ref SERTA",
             options=sorted(df['REF_ARTICLE_SERTA'].dropna().astype(str).unique()))
@@ -199,16 +168,11 @@ with st.expander("🔍 Filtres", expanded=False):
         f_prog = st.multiselect("Programme client",
             options=sorted(df['PROGRAMME'].dropna().replace('', None).dropna().astype(str).unique())
             if 'PROGRAMME' in df.columns else [])
-    with col4:
-        f_origine = st.multiselect("Origine",
-            options=sorted(df['ORIGINE'].dropna().replace('', None).dropna().astype(str).unique())
-            if 'ORIGINE' in df.columns else [])
 
 df_disp = df.copy()
-if f_ref:     df_disp = df_disp[df_disp['REF_ARTICLE_SERTA'].astype(str).isin(f_ref)]
-if f_up:      df_disp = df_disp[df_disp['UP_PRINCIPALE'].astype(str).isin(f_up)]
-if f_prog:    df_disp = df_disp[df_disp['PROGRAMME'].astype(str).isin(f_prog)]
-if f_origine: df_disp = df_disp[df_disp['ORIGINE'].astype(str).isin(f_origine)]
+if f_ref:  df_disp = df_disp[df_disp['REF_ARTICLE_SERTA'].astype(str).isin(f_ref)]
+if f_up:   df_disp = df_disp[df_disp['UP_PRINCIPALE'].astype(str).isin(f_up)]
+if f_prog: df_disp = df_disp[df_disp['PROGRAMME'].astype(str).isin(f_prog)]
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3 = st.tabs(["📋 Tableau pivot", "📈 Graphique", "💾 Export"])

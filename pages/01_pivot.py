@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, date
 from io import BytesIO
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
-from shared import get_engine, get_programmes, execute_procedure, logo_sidebar, wk_cols_from_df, to_excel_bytes
+from shared import get_engine, get_programmes, execute_procedure, logo_sidebar, wk_cols_from_df, to_excel_bytes, get_date_cache, recharger_cache, cache_disponible
 
 st.markdown("""
 <style>
@@ -25,12 +25,21 @@ with st.sidebar:
     st.markdown("---")
 
     st.subheader("1️⃣ Programme(s)")
-    with st.spinner("Chargement..."):
-        df_prog = get_programmes()
+    if 'df_prog_cache' not in st.session_state:
+        with st.spinner("Chargement des programmes..."):
+            st.session_state['df_prog_cache'] = get_programmes()
+    df_prog = st.session_state['df_prog_cache']
 
     if df_prog.empty:
         st.warning("Aucun programme disponible")
         st.stop()
+    
+    if st.button("🔄 Actualiser liste", width='stretch'):
+        if 'df_prog_cache' in st.session_state:
+            del st.session_state['df_prog_cache']
+        get_programmes.clear()   # vide aussi le cache Streamlit @st.cache_data
+        st.rerun()
+
 
     mode = st.radio("Mode", ["Un programme", "Plusieurs"], horizontal=True)
 
@@ -67,9 +76,9 @@ with st.sidebar:
             st.caption(f"{len(options_filtrees)} programme(s) dans cette période")
             col_a, col_b = st.columns(2)
             with col_a:
-                btn_ajouter   = st.form_submit_button("➕ Ajouter", use_container_width=True)
+                btn_ajouter   = st.form_submit_button("➕ Ajouter", width='stretch')
             with col_b:
-                btn_remplacer = st.form_submit_button("🔄 Remplacer", use_container_width=True)
+                btn_remplacer = st.form_submit_button("🔄 Remplacer", width='stretch')
 
         if 'multiselect_programmes' not in st.session_state:
             st.session_state['multiselect_programmes'] = []
@@ -90,7 +99,7 @@ with st.sidebar:
         selected_ids = df_prog[df_prog['Programme'].isin(progs_choisis)]['FPC_ID'].tolist()
         if selected_ids:
             st.info(f"✅ {len(selected_ids)} programme(s) sélectionné(s)")
-        if st.button("🗑️ Vider", use_container_width=True):
+        if st.button("🗑️ Vider", width='stretch'):
             st.session_state['multiselect_programmes'] = []
             st.rerun()
 
@@ -121,6 +130,20 @@ with st.sidebar:
     source_lot_bool = source_lot.startswith("📦")
 
     st.markdown("---")
+    date_cache = get_date_cache()
+    if date_cache:
+        st.caption(f"📦 Cache : {date_cache.strftime('%d/%m/%Y %H:%M')}")
+    else:
+        st.warning("⚠️ Cache non disponible — procédure complète utilisée")
+    if st.button("🔄 Actualiser cache", width='stretch'):
+        with st.spinner("Rechargement cache en cours..."):
+            ok = recharger_cache()
+        if ok:
+            st.success("✅ Cache mis à jour")
+        else:
+            st.error("❌ Erreur rechargement cache")
+
+    st.markdown("---")
     btn_lancer = st.button("🚀 LANCER", type="primary", width="stretch",
                            disabled=len(selected_ids) == 0)
     if not selected_ids:
@@ -133,25 +156,34 @@ if btn_lancer:
     st.session_state['date_filtre_du'] = date_filtre_du
     st.session_state['date_filtre_au'] = date_filtre_au
     st.session_state['date_prevision'] = date_prevision
-    frames = []
     n = len(selected_ids)
-    for i, fpc_id in enumerate(selected_ids):
-        nom_prog = df_prog[df_prog['FPC_ID'] == fpc_id]['Programme'].values[0]
-        status.text(f"⏳ {i+1}/{n} : {nom_prog}")
-        prog.progress(int((i / n) * 90) + 5)
-        df_tmp = execute_procedure([fpc_id], date_prevision, date_ventilation,
-                                   source_lot_bool, activer_ventilation)
-        if df_tmp is not None and not df_tmp.empty:
-            df_tmp['PROGRAMME'] = str(nom_prog)
-            row_prog = df_prog[df_prog['FPC_ID'] == fpc_id].iloc[0]
-            df_tmp['CODE_CLIENT'] = str(row_prog.get('CLI_CODE', '')).strip()
-            df_tmp = df_tmp.drop(columns=[c for c in ['NOM_FICHIER_PROGRAMME_CLIENT',
-                'LIBELLE_SYSTEME_COMMANDE','DATE_BORN_GAUCHE','DATE_BORN_DROIT']
-                if c in df_tmp.columns])
-            frames.append(df_tmp)
 
-    if frames:
+    status.text(f"⏳ Ventilation de {n} programme(s) en cours...")
+    prog.progress(10)
+
+    df_res = execute_procedure(selected_ids, date_prevision, date_ventilation,
+                               source_lot_bool, activer_ventilation)
+    prog.progress(80)
+
+    # Ajouter PROGRAMME et CODE_CLIENT depuis df_prog
+    if df_res is not None and not df_res.empty:
+        prog_map = df_prog.set_index('FPC_ID')[['Programme', 'CLI_CODE']]
+        if 'NOM_FICHIER_PROGRAMME_CLIENT' in df_res.columns:
+            def get_prog_name(nom):
+                match = df_prog[df_prog['Programme'] == nom]
+                return nom if not match.empty else nom
+            df_res['PROGRAMME'] = df_res['NOM_FICHIER_PROGRAMME_CLIENT']
+            df_res['CODE_CLIENT'] = df_res['NOM_FICHIER_PROGRAMME_CLIENT'].apply(
+                lambda x: str(x).split('_')[0] if '_' in str(x) else '')
+            df_res = df_res.drop(columns=[c for c in [
+                'NOM_FICHIER_PROGRAMME_CLIENT', 'LIBELLE_SYSTEME_COMMANDE',
+                'DATE_BORN_GAUCHE', 'DATE_BORN_DROIT'] if c in df_res.columns])
+
+    if df_res is not None and not df_res.empty:
+        frames = [df_res]
         df_res = pd.concat(frames, ignore_index=True, sort=False)
+        df_res = df_res.replace({'': None, ' ': None})
+
 
         # Colonnes texte → str avant fillna pour éviter ArrowTypeError (UP_PRINCIPALE mixte)
         TEXT_COLS = ['PROGRAMME', 'UP_PRINCIPALE', 'CODE_SELECTION',
@@ -177,7 +209,7 @@ if btn_lancer:
         st.session_state['df_pivot'] = df_res
     else:
         prog.empty(); status.empty()
-        st.warning("⚠️ Aucune donnée retournée")
+        st.warning("⚠️ Aucune donnée retournée — vérifiez les programmes et les dates")
 
 # ── Affichage ─────────────────────────────────────────────────────────────────
 if 'df_pivot' not in st.session_state:

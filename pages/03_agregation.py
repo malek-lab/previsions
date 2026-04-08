@@ -69,11 +69,13 @@ df_lpc = st.session_state['df_pivot'].copy()
 # ── Préparer LPC : ajouter colonnes ORIGINE + CODE_CLIENT ────────────────────
 wk_lpc = wk_cols_from_df(df_lpc)
 
-# Extraire CODE_CLIENT depuis colonne PROGRAMME (déjà taguée en page 01)
-if 'PROGRAMME' in df_lpc.columns:
-    df_lpc['CODE_CLIENT'] = df_lpc['PROGRAMME'].apply(extract_code_client)
+# CODE_CLIENT depuis colonne directe si dispo, sinon depuis PROGRAMME
+if 'CODE_CLIENT' in df_lpc.columns and df_lpc['CODE_CLIENT'].astype(str).str.strip().replace('0','').ne('').any():
+    df_lpc['CODE_CLIENT'] = df_lpc['CODE_CLIENT'].astype(str).str.strip()
+elif 'PROGRAMME' in df_lpc.columns:
+    df_lpc['CODE_CLIENT'] = df_lpc['PROGRAMME'].apply(extract_code_client).astype(str)
 else:
-    df_lpc['CODE_CLIENT'] = None
+    df_lpc['CODE_CLIENT'] = ''
 
 df_lpc['ORIGINE'] = 'LPC'
 
@@ -84,7 +86,7 @@ META_LPC_COLS = ['CODE_CLIENT', 'ORIGINE', 'PROGRAMME', 'REF_ARTICLE_SERTA',
 
 # Construire les couples LPC pour filtrer le carnet
 couples_lpc = set(
-    df_lpc['CODE_CLIENT'].astype(str) + '|' + df_lpc['REF_ARTICLE_SERTA'].astype(str)
+    df_lpc['CODE_CLIENT'].astype(str).str.strip() + '|' + df_lpc['REF_ARTICLE_SERTA'].astype(str).str.strip()
 )
 
 # ── Charger carnet ────────────────────────────────────────────────────────────
@@ -133,8 +135,11 @@ def charger_carnet(couples_lpc, date_du, date_au):
         return pd.DataFrame()
 
     # Garder uniquement couples ABSENTS des LPC
-    df['CODE_CLIENT'] = df['CODE_CLIENT'].astype(str).str.strip()
+    df['CODE_CLIENT']       = df['CODE_CLIENT'].astype(str).str.strip()
     df['REF_ARTICLE_SERTA'] = df['REF_ARTICLE_SERTA'].astype(str).str.strip()
+    # Calculer besoin retard/encours AVANT le filtre couples
+    df_retard  = df[df['CLIENT_ACK_DATE'].dt.date <  date_du]
+    df_encours = df[(df['CLIENT_ACK_DATE'].dt.date >= date_du) & (df['CLIENT_ACK_DATE'].dt.date <= date_au)]
     df['_COUPLE'] = df['CODE_CLIENT'] + '|' + df['REF_ARTICLE_SERTA']
     df = df[~df['_COUPLE'].isin(couples_lpc)].drop(columns=['_COUPLE'])
 
@@ -142,32 +147,80 @@ def charger_carnet(couples_lpc, date_du, date_au):
         return pd.DataFrame()
 
     # Ajouter colonnes méta fixes
-    df['ORIGINE']       = 'CARNET'
-    df['PROGRAMME']     = ''
+    df['ORIGINE']        = 'CARNET'
+    df['PROGRAMME']      = ''
     df['CODE_SELECTION'] = ''
-    df['QTE_TOTALE']    = None
+    df['QTE_TOTALE']     = None
+
+    # Besoin retard et encours par couple
+    besoin_retard  = df_retard.groupby(['CODE_CLIENT','REF_ARTICLE_SERTA'])['QTE'].sum().reset_index()
+    besoin_retard.columns  = ['CODE_CLIENT','REF_ARTICLE_SERTA','QTE_BESOIN_CLIENT_RETARD_SC']
+    besoin_encours = df_encours.groupby(['CODE_CLIENT','REF_ARTICLE_SERTA'])['QTE'].sum().reset_index()
+    besoin_encours.columns = ['CODE_CLIENT','REF_ARTICLE_SERTA','QTE_BESOIN_CLIENT_ENCOURS_SC']
 
     # Pivoter par semaine
     meta = ['CODE_CLIENT', 'REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT', 'ORIGINE',
             'PROGRAMME', 'UP_PRINCIPALE', 'CODE_SELECTION', 'QTE_UC', 'QTE_MOQ', 'QTE_TOTALE',
             'SERTA_SO_CLIENT_GROUP_NAME', 'SERTA_SO_CLIENT_NAME', 'SALES_ADMINISTRATION_PERSON']
     meta = [c for c in meta if c in df.columns]
+    for c in meta:
+        if df[c].dtype == object:
+            df[c] = df[c].fillna('').astype(str)
+        else:
+            df[c] = df[c].fillna(0)
 
-    for _m in meta:
-        df[_m] = df[_m].fillna('').astype(str)
-    df['QTE'] = pd.to_numeric(df['QTE'], errors='coerce').fillna(0)
-
-    agg = df.groupby(meta + ['SEMAINE'], dropna=False)['QTE'].sum().reset_index()
+    agg   = df.groupby(meta + ['SEMAINE'])['QTE'].sum().reset_index()
     pivot = agg.pivot_table(index=meta, columns='SEMAINE', values='QTE',
                             aggfunc='sum', fill_value=0).reset_index()
     pivot.columns.name = None
+
+    pivot = pivot.merge(besoin_retard,  on=['CODE_CLIENT','REF_ARTICLE_SERTA'], how='left')
+    pivot = pivot.merge(besoin_encours, on=['CODE_CLIENT','REF_ARTICLE_SERTA'], how='left')
+    for col in ['QTE_BESOIN_CLIENT_RETARD_SC','QTE_BESOIN_CLIENT_ENCOURS_SC']:
+        pivot[col] = pd.to_numeric(pivot[col], errors='coerce').fillna(0).astype(int)
     return pivot
 
+
+
+def charger_suivi_carnet(date_prevision, date_ventilation):
+    from sqlalchemy import text
+    engine = get_engine()
+    if engine is None:
+        return pd.DataFrame()
+    try:
+        dp = date_prevision.strftime('%Y-%m-%d')
+        dv = date_ventilation.strftime('%Y-%m-%d')
+        with engine.connect() as conn:
+            df = pd.read_sql(text(f"""
+                SELECT
+                    CODE_CLIENT,
+                    REF_ARTICLE_SERTA,
+                    SUM(CASE WHEN DATE_FACTURE IS NULL
+                              AND DATE_EXPEDITION <= '{dp}'
+                        THEN QTE_EXPEDIEE ELSE 0 END)  AS QTE_EN_TRANSITE_RETARD,
+                    SUM(CASE WHEN DATE_FACTURE IS NULL
+                              AND DATE_EXPEDITION >  '{dp}'
+                              AND DATE_EXPEDITION <= '{dv}'
+                        THEN QTE_EXPEDIEE ELSE 0 END)  AS QTE_EN_TRANSITE_ENCOURS,
+                    SUM(CASE WHEN DATE_FACTURE IS NOT NULL
+                              AND DATE_FACTURE >  '{dp}'
+                              AND DATE_FACTURE <= '{dv}'
+                        THEN QTE_EXPEDIEE ELSE 0 END)  AS QTE_FACTUREE_ENCOURS
+                FROM [master].[dbo].[V_EXPEDITION_SUIVI]
+                GROUP BY CODE_CLIENT, REF_ARTICLE_SERTA
+            """), conn)
+        df['CODE_CLIENT']       = df['CODE_CLIENT'].astype(str).str.strip()
+        df['REF_ARTICLE_SERTA'] = df['REF_ARTICLE_SERTA'].astype(str).str.strip()
+        return df
+    except Exception as e:
+        st.warning(f"Suivi expédition non disponible : {e}")
+        return pd.DataFrame()
 
 # ── Fusionner LPC + CARNET ────────────────────────────────────────────────────
 if btn_ajouter_carnet:
     with st.spinner("⏳ Chargement carnet de commande..."):
         df_carnet = charger_carnet(couples_lpc, date_filtre_du, date_filtre_au)
+        df_suivi  = charger_suivi_carnet(date_filtre_du, date_filtre_au)
 
     if df_carnet.empty:
         st.info("ℹ️ Aucune ligne carnet à ajouter — tous les couples (client+ref) sont couverts par les LPC sélectionnés.")
@@ -179,11 +232,33 @@ if btn_ajouter_carnet:
         st.success(f"✅ {len(df_carnet)} lignes carnet ajoutées")
         df_all = pd.concat([df_lpc, df_carnet], ignore_index=True, sort=False)
 
+    # Joindre suivi expédition sur lignes CARNET + calculer cutoff
+    if not df_suivi.empty and 'ORIGINE' in df_all.columns:
+        mask = df_all['ORIGINE'] == 'CARNET'
+        df_c = df_all[mask].copy()
+        df_c = df_c.merge(df_suivi, on=['CODE_CLIENT','REF_ARTICLE_SERTA'], how='left')
+        for col in ['QTE_EN_TRANSITE_RETARD_SC','QTE_EN_TRANSITE_ENCOURS_SC','QTE_FACTUREE_ENCOURS_SC']:
+            if col not in df_c.columns:
+                df_c[col] = 0
+            df_c[col] = pd.to_numeric(df_c[col], errors='coerce').fillna(0).astype(int)
+        for col in ['QTE_BESOIN_CLIENT_RETARD_SC','QTE_BESOIN_CLIENT_ENCOURS_SC']:
+            if col not in df_c.columns:
+                df_c[col] = 0
+            df_c[col] = pd.to_numeric(df_c[col], errors='coerce').fillna(0).astype(int)
+        # QTE_CUTOFF_RETARD
+        df_c['QTE_CUTOFF_RETARD_SC']   = df_c['QTE_BESOIN_CLIENT_RETARD_SC'] + df_c['QTE_EN_TRANSITE_RETARD_SC']
+        # QTE_CUTOFF_PREVISION
+        df_c['QTE_CUTOFF_PREVISION_SC'] = df_c['QTE_EN_TRANSITE_ENCOURS_SC'] + df_c['QTE_FACTUREE_ENCOURS_SC'] + df_c['QTE_BESOIN_CLIENT_ENCOURS_SC']
+        df_all = pd.concat([df_all[~mask], df_c], ignore_index=True, sort=False)
+
     # Forcer types texte pour éviter erreur Arrow
-    for col in ['PROGRAMME', 'HORIZON_PROGRAMME', 'CODE_SELECTION', 'ORIGINE', 'CODE_CLIENT',
+    for col in ['PROGRAMME', 'CODE_SELECTION', 'ORIGINE', 'CODE_CLIENT',
                 'SERTA_SO_CLIENT_GROUP_NAME', 'SERTA_SO_CLIENT_NAME', 'SALES_ADMINISTRATION_PERSON']:
         if col in df_all.columns:
             df_all[col] = df_all[col].fillna('').astype(str)
+    # QTE_TOTALE mixte str/int → numérique
+    if 'QTE_TOTALE' in df_all.columns:
+        df_all['QTE_TOTALE'] = pd.to_numeric(df_all['QTE_TOTALE'], errors='coerce').fillna(0)
 
     # Remplir NaN dans colonnes semaines
     wk_all = wk_cols_from_df(df_all)
@@ -215,6 +290,9 @@ else:
 META_ALL = ['CODE_CLIENT', 'REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT', 'ORIGINE',
             'PROGRAMME', 'HORIZON_PROGRAMME', 'UP_PRINCIPALE', 'CODE_SELECTION',
             'QTE_UC', 'QTE_MOQ', 'QTE_TOTALE',
+            'QTE_EN_TRANSITE_RETARD_SC', 'QTE_BESOIN_CLIENT_RETARD_SC', 'QTE_CUTOFF_RETARD_SC',
+            'QTE_FACTUREE_ENCOURS_SC', 'QTE_EN_TRANSITE_ENCOURS_SC',
+            'QTE_BESOIN_CLIENT_ENCOURS_SC', 'QTE_CUTOFF_PREVISION_SC',
             'SERTA_SO_CLIENT_GROUP_NAME', 'SERTA_SO_CLIENT_NAME', 'SALES_ADMINISTRATION_PERSON']
 META_ALL = [c for c in META_ALL if c in df_aff.columns]
 wk_cols  = sorted([c for c in df_aff.columns if c not in META_ALL

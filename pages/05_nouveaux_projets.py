@@ -272,7 +272,7 @@ else:
     edited = st.data_editor(
         df_edit[['GARDER'] + meta_pres_ex + wk_pres_ex],
         column_config=col_cfg_ex,
-        use_container_width=True,
+        width='stretch',
         height=300,
         key="editor_existants"
     )
@@ -284,43 +284,29 @@ nb_a_integrer = len(df_nouveaux) + (len(df_existants_sel) if not df_existants_se
 st.info(f"**{nb_a_integrer} projet(s) à intégrer** — {len(df_nouveaux)} nouveaux "
         f"+ {len(df_existants_sel) if not df_existants_sel.empty else 0} doublon(s) conservés")
 
-# Export Excel deux feuilles
-def to_excel_deux_feuilles(df1, df2):
-    from io import BytesIO
-    buf = BytesIO()
-    with pd.ExcelWriter(buf, engine='openpyxl') as w:
-        if not df1.empty:
-            wk1 = sorted(wk_cols_from_df(df1))
-            m1  = [c for c in META_PROJ if c in df1.columns]
-            df1[[c for c in m1 + wk1 if c in df1.columns]].to_excel(w, index=False, sheet_name='Nouvelles refs')
-        if not df2.empty:
-            wk2 = sorted(wk_cols_from_df(df2))
-            m2  = [c for c in META_PROJ if c in df2.columns]
-            df2[[c for c in m2 + wk2 if c in df2.columns]].to_excel(w, index=False, sheet_name='Refs existantes')
-    return buf.getvalue()
-
-st.download_button("📥 Export Excel (2 feuilles)",
-    data=to_excel_deux_feuilles(df_nouveaux, df_existants),
-    file_name=f"nouveaux_projets_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    width="stretch")
-
 if st.button("✅ Intégrer dans la consolidée (page 04)", type="primary",
              disabled=nb_a_integrer == 0, width="stretch"):
 
-    frames = [df_nouveaux]
+    def _prep(df_, doublon=False):
+        df_ = df_.copy()
+        for col in ['CODE_CLIENT', 'PROGRAMME', 'ORIGINE', 'CODE_SELECTION']:
+            if col in df_.columns:
+                df_[col] = df_[col].fillna('').astype(str)
+        if 'NUM_PROJET' in df_.columns:
+            df_['PROGRAMME'] = df_['NUM_PROJET'].astype(str)
+        df_['ORIGINE'] = 'PROJET'
+        df_['DOUBLON'] = doublon
+        for _c in wk_cols_from_df(df_):
+            df_[_c] = pd.to_numeric(df_[_c], errors='coerce').fillna(0)
+        return df_
+
+    # Nouvelles refs → consolidées par ref dans page 04
+    st.session_state['df_projets_nouveaux'] = _prep(df_nouveaux, doublon=False) if not df_nouveaux.empty else pd.DataFrame()
+
+    # Doublons gardés → lignes séparées, DOUBLON=True
     if not df_existants_sel.empty:
-        frames.append(df_existants_sel)
-    df_a_integrer = pd.concat(frames, ignore_index=True, sort=False)
+        st.session_state['df_projets_doublons'] = _prep(df_existants_sel, doublon=True)
+    else:
+        st.session_state['df_projets_doublons'] = pd.DataFrame()
 
-    for col in ['CODE_CLIENT', 'PROGRAMME', 'ORIGINE', 'CODE_SELECTION']:
-        if col in df_a_integrer.columns:
-            df_a_integrer[col] = df_a_integrer[col].fillna('').astype(str)
-    # PROGRAMME vide pour les projets (pas de programme LPC)
-    df_a_integrer['PROGRAMME'] = ''
-    # Semaines numériques
-    for _c in wk_cols_from_df(df_a_integrer):
-        df_a_integrer[_c] = pd.to_numeric(df_a_integrer[_c], errors='coerce').fillna(0)
-
-    st.session_state['df_projets_a_integrer'] = df_a_integrer
-    st.success(f"✅ {len(df_a_integrer)} projets prêts — allez sur la page **📊 Consolidée** pour finaliser et exporter.")
+    st.success(f"✅ {nb_a_integrer} projets prêts — allez sur la page **📊 Consolidée** pour finaliser et exporter.")
