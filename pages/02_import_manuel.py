@@ -218,9 +218,9 @@ if uploaded_files:
         st.markdown("---")
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("✅ Intégrer dans le pivot", type="primary", use_container_width=True):
+            if st.button("✅ Valider l'import", type="primary", use_container_width=True):
                 st.session_state['df_manuels'] = df_transformed
-                st.success(f"✅ {len(df_transformed)} programmes manuels prêts — allez sur la page **Agrégation**")
+                st.success(f"✅ {len(df_transformed)} programmes prêts — allez sur la page **📦 Agrégation** et cliquez sur **Charger / Actualiser carnet**")
         with col2:
             if st.button("🗑️ Annuler", use_container_width=True):
                 st.session_state.pop('df_manuels', None)
@@ -243,6 +243,12 @@ if 'df_manuels' in st.session_state:
 
     if st.button("📋 Voir détail complet", use_container_width=True):
         meta_cols = [c for c in df_m.columns if c not in wk_m]
-        st.dataframe(df_m[meta_cols + wk_m[:10]], width='stretch', height=400)
+        col_cfg_m = {wk: st.column_config.NumberColumn(wk, format="%d") for wk in wk_m}
+        st.dataframe(
+            df_m[meta_cols + wk_m],
+            width='stretch',
+            height=min(len(df_m) * 35 + 50, 1200),
+            column_config=col_cfg_m
+        )
 else:
     st.info("Aucun import actif — uploadez un fichier pour commencer")

@@ -19,31 +19,21 @@ def get_engine():
         st.error(f"Erreur connexion : {e}")
         return None
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600)
 def get_programmes():
     engine = get_engine()
     if engine is None:
         return pd.DataFrame()
-
     try:
         with engine.connect() as conn:
-            df = pd.read_sql(text("""
-                SELECT
-                    FPC_ID,
-                    Programme,
-                    CLI_ID,
-                    CLI_CODE,
-                    CLI_NOM,
-                    Horizon_programme,
-                    QTE_PREVISION_TOTALE,
-                    Cadencement,
-                    DATE_CACHE
-                FROM [dbo].[T_CACHE_PROGRAMMES]
+            return pd.read_sql(text("""
+                SELECT FPC_ID, Programme, CLI_CODE, CLI_NOM,
+                       MAX(Horizon_programme) AS Horizon_programme,
+                       SUM(QTE_PREVISION_TOTALE) AS QTE_PREVISION_TOTALE
+                FROM [master].[dbo].[Programme_VW]
+                GROUP BY FPC_ID, Programme, CLI_CODE, CLI_NOM
                 ORDER BY Programme
             """), conn)
-
-        return df
-
     except Exception as e:
         st.error(f"Erreur chargement programmes : {e}")
         return pd.DataFrame()
@@ -86,10 +76,32 @@ def recharger_cache():
         print(f"Erreur rechargement cache : {e}")
         return False
 
+def execute_procedure_single(fpc_id, date_prevision, date_ventilation, source_lot, activer_ventilation=True):
+    """Appel procédure pour UN SEUL programme (FPC_ID unique)."""
+    engine = get_engine()
+    if engine is None:
+        return None
+    try:
+        date_vent_eff = date_ventilation if activer_ventilation else date(1900, 1, 1)
+        sql = f"""
+        EXEC P_R_PIVOT_PREVISION_DEV_LOCAL
+            @SERVEUR_LIE            = 'SRV-MSSQLDB',
+            @FPC_ID                 = '{fpc_id}',
+            @DATE_DEBUT_PREVISION   = '{date_prevision.strftime('%Y-%m-%d')}',
+            @DATE_DEBUT_VENTILATION = '{date_vent_eff.strftime('%Y-%m-%d')}',
+            @SOURCE_QTE_LOT         = {1 if source_lot else 0}
+        """
+        with engine.connect() as conn:
+            return pd.read_sql(text(sql), conn)
+    except Exception as e:
+        st.error(f"Erreur procédure (FPC_ID={fpc_id}) : {e}")
+        with st.expander("Détails"):
+            st.exception(e)
+        return None
+
 def execute_procedure(fpc_ids, date_prevision, date_ventilation, source_lot, activer_ventilation=True):
     """
-    Appel procédure vectorisée pour tous les FPC_IDs en une seule requête.
-    Fallback sur l'ancienne procédure si le cache n'est pas disponible.
+    Appel procédure vectorisée si cache dispo, sinon séquentiel.
     """
     if not fpc_ids:
         return None
@@ -97,11 +109,10 @@ def execute_procedure(fpc_ids, date_prevision, date_ventilation, source_lot, act
     if engine is None:
         return None
     try:
-        date_vent_eff = date_ventilation if activer_ventilation else date(9999, 12, 31)
+        date_vent_eff = date_ventilation if activer_ventilation else date(1900, 1, 1)
         fpc_list = ','.join(str(f) for f in fpc_ids)
 
         if cache_disponible():
-            # Procédure vectorisée — tous les IDs en une seule fois
             sql = f"""
             EXEC [dbo].[P_R_PIVOT_PREVISION_CACHE_VECTORIZED]
                 @SERVEUR_LIE            = 'SRV-MSSQLDB',
@@ -115,7 +126,6 @@ def execute_procedure(fpc_ids, date_prevision, date_ventilation, source_lot, act
             print(f"Vectorisée OK — {len(fpc_ids)} programmes → {len(df)} lignes")
             return df if not df.empty else None
         else:
-            # Fallback séquentiel — ancienne procédure un par un
             frames = []
             for fpc_id in fpc_ids:
                 try:

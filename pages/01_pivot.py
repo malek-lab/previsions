@@ -33,13 +33,12 @@ with st.sidebar:
     if df_prog.empty:
         st.warning("Aucun programme disponible")
         st.stop()
-    
+
     if st.button("🔄 Actualiser liste", width='stretch'):
         if 'df_prog_cache' in st.session_state:
             del st.session_state['df_prog_cache']
-        get_programmes.clear()   # vide aussi le cache Streamlit @st.cache_data
+        get_programmes.clear()
         st.rerun()
-
 
     mode = st.radio("Mode", ["Un programme", "Plusieurs"], horizontal=True)
 
@@ -153,9 +152,10 @@ with st.sidebar:
 if btn_lancer:
     prog   = st.progress(0)
     status = st.empty()
-    st.session_state['date_filtre_du'] = date_filtre_du
-    st.session_state['date_filtre_au'] = date_filtre_au
-    st.session_state['date_prevision'] = date_prevision
+    st.session_state['date_filtre_du']  = date_filtre_du
+    st.session_state['date_filtre_au']  = date_filtre_au
+    st.session_state['date_prevision']  = date_prevision
+    st.session_state['date_ventilation'] = date_ventilation
     n = len(selected_ids)
 
     status.text(f"⏳ Ventilation de {n} programme(s) en cours...")
@@ -165,13 +165,8 @@ if btn_lancer:
                                source_lot_bool, activer_ventilation)
     prog.progress(80)
 
-    # Ajouter PROGRAMME et CODE_CLIENT depuis df_prog
     if df_res is not None and not df_res.empty:
-        prog_map = df_prog.set_index('FPC_ID')[['Programme', 'CLI_CODE']]
         if 'NOM_FICHIER_PROGRAMME_CLIENT' in df_res.columns:
-            def get_prog_name(nom):
-                match = df_prog[df_prog['Programme'] == nom]
-                return nom if not match.empty else nom
             df_res['PROGRAMME'] = df_res['NOM_FICHIER_PROGRAMME_CLIENT']
             df_res['CODE_CLIENT'] = df_res['NOM_FICHIER_PROGRAMME_CLIENT'].apply(
                 lambda x: str(x).split('_')[0] if '_' in str(x) else '')
@@ -179,13 +174,6 @@ if btn_lancer:
                 'NOM_FICHIER_PROGRAMME_CLIENT', 'LIBELLE_SYSTEME_COMMANDE',
                 'DATE_BORN_GAUCHE', 'DATE_BORN_DROIT'] if c in df_res.columns])
 
-    if df_res is not None and not df_res.empty:
-        frames = [df_res]
-        df_res = pd.concat(frames, ignore_index=True, sort=False)
-        df_res = df_res.replace({'': None, ' ': None})
-
-
-        # Colonnes texte → str avant fillna pour éviter ArrowTypeError (UP_PRINCIPALE mixte)
         TEXT_COLS = ['PROGRAMME', 'UP_PRINCIPALE', 'CODE_SELECTION',
                      'REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT', 'CODE_CLIENT',
                      'HORIZON_PROGRAMME']
@@ -193,7 +181,6 @@ if btn_lancer:
             if _c in df_res.columns:
                 df_res[_c] = df_res[_c].fillna('').astype(str)
 
-        # Colonnes numériques → pd.to_numeric + fillna(0) sans downcasting warning
         for _c in [c for c in df_res.columns if c not in TEXT_COLS]:
             if df_res[_c].dtype == object:
                 df_res[_c] = pd.to_numeric(df_res[_c], errors='coerce')
@@ -219,7 +206,6 @@ if 'df_pivot' not in st.session_state:
 df      = st.session_state['df_pivot']
 wk_cols = wk_cols_from_df(df)
 
-# Filtrer les colonnes semaines selon plage du filtre
 import datetime as _dt
 _fdu = st.session_state.get('date_prevision', None)
 _fau = st.session_state.get('date_filtre_au', None)
@@ -234,7 +220,6 @@ def _wk_ok(col):
         return True
 wk_cols = [c for c in wk_cols if _wk_ok(c)]
 
-# Métriques
 c1, c2, c3 = st.columns(3)
 c1.metric("Articles",   df['REF_ARTICLE_SERTA'].nunique() if 'REF_ARTICLE_SERTA' in df.columns else 0)
 c2.metric("QTY Totale", f"{int(df['QTE_TOTALE'].sum()):,}" if 'QTE_TOTALE' in df.columns else 0)
@@ -265,14 +250,12 @@ with tab1:
     if f_up:   df_disp = df_disp[df_disp['UP_PRINCIPALE'].astype(str).isin(f_up)]
     if f_prog: df_disp = df_disp[df_disp['PROGRAMME'].astype(str).isin(f_prog)]
 
-    # PROGRAMME en première colonne, puis le reste des meta, puis semaines
     all_wk    = wk_cols_from_df(df_disp)
     meta_disp = [c for c in df_disp.columns if c not in all_wk]
-    # Remonter PROGRAMME en tête
     if 'PROGRAMME' in meta_disp:
         meta_disp = ['PROGRAMME'] + [c for c in meta_disp if c != 'PROGRAMME']
-    col_cfg   = {wk: st.column_config.NumberColumn(wk, format="%d") for wk in wk_cols}
-    wk_disp   = [c for c in wk_cols if c in df_disp.columns]
+    col_cfg = {wk: st.column_config.NumberColumn(wk, format="%d") for wk in wk_cols}
+    wk_disp = [c for c in wk_cols if c in df_disp.columns]
     st.caption(f"{len(df_disp):,} lignes")
     st.dataframe(df_disp[meta_disp + wk_disp], width='stretch', height=600,
                  column_config=col_cfg)

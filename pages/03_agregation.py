@@ -79,26 +79,12 @@ else:
 
 df_lpc['ORIGINE'] = 'LPC'
 
-# ── Intégrer programmes manuels (hors Lasernet) ───────────────────────────────
-if 'df_manuels' in st.session_state:
-    df_manuels = st.session_state['df_manuels'].copy()
-    # Aligner colonnes semaines avec LPC
-    df_lpc = pd.concat([df_lpc, df_manuels], ignore_index=True, sort=False)
-    wk_all_lpc = wk_cols_from_df(df_lpc)
-    for c in wk_all_lpc:
-        df_lpc[c] = pd.to_numeric(df_lpc[c], errors='coerce').fillna(0)
-    for col in ['PROGRAMME', 'CODE_CLIENT', 'ORIGINE', 'CODE_SELECTION']:
-        if col in df_lpc.columns:
-            df_lpc[col] = df_lpc[col].fillna('').astype(str)
-    nb_manuels = len(df_manuels)
-    st.info(f"📂 {nb_manuels} programme(s) manuel(s) intégrés depuis la page Import")
-
 # Colonnes méta LPC disponibles
 META_LPC_COLS = ['CODE_CLIENT', 'ORIGINE', 'PROGRAMME', 'REF_ARTICLE_SERTA',
                  'REF_ARTICLE_CLIENT', 'UP_PRINCIPALE', 'CODE_SELECTION',
                  'QTE_UC', 'QTE_MOQ', 'QTE_TOTALE']
 
-# Construire les couples LPC + MANUELS pour filtrer le carnet
+# Construire les couples LPC pour filtrer carnet ET manuels
 couples_lpc = set(
     df_lpc['CODE_CLIENT'].astype(str).str.strip() + '|' + df_lpc['REF_ARTICLE_SERTA'].astype(str).str.strip()
 )
@@ -234,17 +220,39 @@ def charger_suivi_carnet(date_prevision, date_ventilation):
 if btn_ajouter_carnet:
     with st.spinner("⏳ Chargement carnet de commande..."):
         df_carnet = charger_carnet(couples_lpc, date_filtre_du, date_filtre_au)
-        df_suivi  = charger_suivi_carnet(date_filtre_du, date_filtre_au)
+        date_prev = st.session_state.get('date_prevision', date_filtre_du)
+        date_vent = st.session_state.get('date_ventilation', date_filtre_au)
+        df_suivi  = charger_suivi_carnet(date_prev, date_vent)
 
+    # Manuels filtrés — même logique que carnet (couples absents du LPC)
+    df_manuels_filtres = pd.DataFrame()
+    if 'df_manuels' in st.session_state:
+        df_m = st.session_state['df_manuels'].copy()
+        df_m['CODE_CLIENT']       = df_m['CODE_CLIENT'].astype(str).str.strip()
+        df_m['REF_ARTICLE_SERTA'] = df_m['REF_ARTICLE_SERTA'].astype(str).str.strip()
+        df_m['_COUPLE'] = df_m['CODE_CLIENT'] + '|' + df_m['REF_ARTICLE_SERTA']
+        df_manuels_filtres = df_m[~df_m['_COUPLE'].isin(couples_lpc)].drop(columns=['_COUPLE'])
+        wk_m = wk_cols_from_df(df_manuels_filtres)
+        wk_m_range = [c for c in wk_m if wk_label_to_date(c) is not None
+                      and date_filtre_du <= wk_label_to_date(c) <= date_filtre_au]
+        meta_m = [c for c in df_manuels_filtres.columns if c not in wk_m]
+        if wk_m_range:
+            df_manuels_filtres = df_manuels_filtres[meta_m + wk_m_range]
+        for c in wk_cols_from_df(df_manuels_filtres):
+            df_manuels_filtres[c] = pd.to_numeric(df_manuels_filtres[c], errors='coerce').fillna(0)
+
+    frames_all = [df_lpc]
+    if not df_manuels_filtres.empty:
+        st.success(f"✅ {len(df_manuels_filtres)} lignes Hors Lasernet ajoutées (ORIGINE=MANUEL)")
+        frames_all.append(df_manuels_filtres)
     if df_carnet.empty:
-        st.info("ℹ️ Aucune ligne carnet à ajouter — tous les couples (client+ref) sont couverts par les LPC sélectionnés.")
-        df_all = df_lpc.copy()
-        df_all['SERTA_SO_CLIENT_GROUP_NAME'] = ''
-        df_all['SERTA_SO_CLIENT_NAME']       = ''
-        df_all['SALES_ADMINISTRATION_PERSON'] = ''
+        st.info("ℹ️ Aucune ligne carnet à ajouter — tous les couples sont couverts.")
     else:
         st.success(f"✅ {len(df_carnet)} lignes carnet ajoutées")
-        df_all = pd.concat([df_lpc, df_carnet], ignore_index=True, sort=False)
+        frames_all.append(df_carnet)
+    df_all = pd.concat(
+        [f.dropna(axis=1, how='all') for f in frames_all],
+        ignore_index=True, sort=False)
 
     # Joindre suivi expédition sur lignes CARNET + calculer cutoff
     if not df_suivi.empty and 'ORIGINE' in df_all.columns:
@@ -263,7 +271,10 @@ if btn_ajouter_carnet:
         df_c['QTE_CUTOFF_RETARD_SC']   = df_c['QTE_BESOIN_CLIENT_RETARD_SC'] + df_c['QTE_EN_TRANSITE_RETARD_SC']
         # QTE_CUTOFF_PREVISION
         df_c['QTE_CUTOFF_PREVISION_SC'] = df_c['QTE_EN_TRANSITE_ENCOURS_SC'] + df_c['QTE_FACTUREE_ENCOURS_SC'] + df_c['QTE_BESOIN_CLIENT_ENCOURS_SC']
-        df_all = pd.concat([df_all[~mask], df_c], ignore_index=True, sort=False)
+        df_all = pd.concat([
+            df_all[~mask].dropna(axis=1, how='all'),
+            df_c.dropna(axis=1, how='all')
+        ], ignore_index=True, sort=False)
 
     # Forcer types texte pour éviter erreur Arrow
     for col in ['PROGRAMME', 'CODE_SELECTION', 'ORIGINE', 'CODE_CLIENT',
@@ -285,6 +296,33 @@ if btn_ajouter_carnet:
                    and date_filtre_du <= wk_label_to_date(c) <= date_filtre_au]
     meta_cols = [c for c in df_all.columns if c not in wk_all]
     df_all = df_all[meta_cols + sorted(wk_in_range)]
+
+    # Mapping groupe client depuis V_SUPPLY_CHAIN → LPC et MANUEL
+    try:
+        from sqlalchemy import text as _text2
+        with get_engine().connect() as _conn:
+            df_grp = pd.read_sql(_text2(
+                "SELECT DISTINCT SERTA_SO_CLIENT_CODE AS CODE_CLIENT, "
+                "SERTA_SO_CLIENT_GROUP_NAME, SERTA_SO_CLIENT_NAME, "
+                "SALES_ADMINISTRATION_PERSON "
+                "FROM [master].[dbo].[V_SUPPLY_CHAIN] "
+                "WHERE SERTA_SO_CLIENT_GROUP_NAME IS NOT NULL"
+            ), _conn)
+        df_grp['CODE_CLIENT'] = df_grp['CODE_CLIENT'].astype(str).str.strip()
+        df_grp = df_grp.drop_duplicates('CODE_CLIENT')
+        for _col in ['SERTA_SO_CLIENT_GROUP_NAME','SERTA_SO_CLIENT_NAME','SALES_ADMINISTRATION_PERSON']:
+            if _col not in df_all.columns:
+                df_all[_col] = ''
+            df_all[_col] = df_all[_col].fillna('').astype(str).str.strip()
+        grp_map = df_grp.set_index('CODE_CLIENT').to_dict('index')
+        mask = df_all['SERTA_SO_CLIENT_GROUP_NAME'].isin(['', 'nan', 'None'])
+        codes = df_all.loc[mask, 'CODE_CLIENT'].astype(str).str.strip()
+        for _col in ['SERTA_SO_CLIENT_GROUP_NAME','SERTA_SO_CLIENT_NAME','SALES_ADMINISTRATION_PERSON']:
+            df_all.loc[mask, _col] = codes.map(
+                {k: v.get(_col, '') for k, v in grp_map.items()}
+            ).fillna('')
+    except Exception as _e:
+        print(f"Mapping groupe client échoué : {_e}")
 
     st.session_state['df_03'] = df_all
 
@@ -327,14 +365,16 @@ def _wk_ok(col):
 wk_cols = [c for c in wk_cols if _wk_ok(c)]
 
 # ── Métriques ─────────────────────────────────────────────────────────────────
-nb_lpc    = len(df_aff[df_aff.get('ORIGINE', pd.Series()) == 'LPC']) if 'ORIGINE' in df_aff.columns else len(df_aff)
-nb_carnet = len(df_aff[df_aff.get('ORIGINE', pd.Series()) == 'CARNET']) if 'ORIGINE' in df_aff.columns else 0
+nb_lpc    = len(df_aff[df_aff['ORIGINE'] == 'LPC'])    if 'ORIGINE' in df_aff.columns else len(df_aff)
+nb_manuel = len(df_aff[df_aff['ORIGINE'] == 'MANUEL']) if 'ORIGINE' in df_aff.columns else 0
+nb_carnet = len(df_aff[df_aff['ORIGINE'] == 'CARNET']) if 'ORIGINE' in df_aff.columns else 0
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Lignes LPC",    nb_lpc)
-c2.metric("Lignes CARNET", nb_carnet)
-c3.metric("Semaines",      len(wk_cols))
-c4.metric("Refs SERTA",    df_aff['REF_ARTICLE_SERTA'].nunique() if 'REF_ARTICLE_SERTA' in df_aff.columns else 0)
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Lignes LPC",           nb_lpc)
+c2.metric("Lignes Hors Lasernet", nb_manuel)
+c3.metric("Lignes CARNET",        nb_carnet)
+c4.metric("Semaines",             len(wk_cols))
+c5.metric("Refs SERTA",           df_aff['REF_ARTICLE_SERTA'].nunique() if 'REF_ARTICLE_SERTA' in df_aff.columns else 0)
 if wk_cols:
     st.caption(f"📅 {wk_cols[0]} → {wk_cols[-1]}")
 
@@ -344,7 +384,7 @@ st.markdown("---")
 with st.expander("🔍 Filtres", expanded=False):
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        f_origine = st.multiselect("Origine", options=['LPC', 'CARNET'], default=['LPC', 'CARNET'])
+        f_origine = st.multiselect("Origine", options=['LPC', 'MANUEL', 'CARNET'], default=['LPC', 'MANUEL', 'CARNET'])
     with col2:
         f_client  = st.multiselect("Code client",
             options=sorted(df_aff['CODE_CLIENT'].dropna().astype(str).unique()) if 'CODE_CLIENT' in df_aff.columns else [])
