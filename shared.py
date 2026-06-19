@@ -19,11 +19,26 @@ def get_engine():
         st.error(f"Erreur connexion : {e}")
         return None
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=60)
 def get_programmes():
     engine = get_engine()
     if engine is None:
         return pd.DataFrame()
+    try:
+        with engine.connect() as conn:
+            # Utiliser T_CACHE_PROGRAMMES (cache local) si disponible
+            df = pd.read_sql(text("""
+                SELECT FPC_ID, Programme, CLI_CODE, CLI_NOM,
+                       Horizon_programme,
+                       QTE_PREVISION_TOTALE
+                FROM [master].[dbo].[T_CACHE_PROGRAMMES]
+                ORDER BY Programme
+            """), conn)
+            if not df.empty:
+                return df
+    except:
+        pass
+    # Fallback sur Programme_VW si cache vide
     try:
         with engine.connect() as conn:
             return pd.read_sql(text("""
@@ -71,6 +86,8 @@ def recharger_cache():
         with engine.connect() as conn:
             conn.execute(text("EXEC [dbo].[P_CACHE_NUIT]"))
             conn.commit()
+        # Vider le cache Streamlit de la liste des programmes
+        get_programmes.clear()
         return True
     except Exception as e:
         print(f"Erreur rechargement cache : {e}")
@@ -82,7 +99,7 @@ def execute_procedure_single(fpc_id, date_prevision, date_ventilation, source_lo
     if engine is None:
         return None
     try:
-        date_vent_eff = date_ventilation if activer_ventilation else date(1900, 1, 1)
+        date_vent_eff = date_ventilation if activer_ventilation else date_prevision
         sql = f"""
         EXEC P_R_PIVOT_PREVISION_DEV_LOCAL
             @SERVEUR_LIE            = 'SRV-MSSQLDB',
@@ -109,7 +126,7 @@ def execute_procedure(fpc_ids, date_prevision, date_ventilation, source_lot, act
     if engine is None:
         return None
     try:
-        date_vent_eff = date_ventilation if activer_ventilation else date(1900, 1, 1)
+        date_vent_eff = date_ventilation if activer_ventilation else date_prevision
         fpc_list = ','.join(str(f) for f in fpc_ids)
 
         if cache_disponible():

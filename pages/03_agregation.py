@@ -12,7 +12,7 @@ st.title("📦 Agrégation — LPC + Carnet de commande")
 if get_engine() is None:
     st.stop()
 
-DATES_FICTIVES = ['2030-12-31', '2099-12-31']
+DATES_FICTIVES = ['2030-12-31', '2075-12-31', '2099-12-31']
 
 def semaine_label(d):
     try:
@@ -40,10 +40,12 @@ with st.sidebar:
     st.header("⚙️ Info")
     st.markdown("---")
     st.info(
-        "Cette page repart des données **Prévisions (page 01)** et y ajoute "
+        "Cette page repart des données **Programmes agrégés (page 02)** "
+        "(Lasernet + Hors Lasernet) et y ajoute "
         "les lignes du carnet de commande dont le couple "
-        "`CODE_CLIENT + REF_ARTICLE_SERTA` n'est pas couvert par un programme LPC.\n\n"
-        "👈 Lancez d'abord la page **📊 Pivot Prévision** pour alimenter cette vue."
+        "`CODE_CLIENT + REF_ARTICLE_SERTA` n'est pas couvert.\n\n"
+        "👈 Allez d'abord sur la page **📂 Dépôt & Agrégation** "
+        "et agrégez les fichiers pour alimenter cette vue."
     )
 
     st.markdown("---")
@@ -59,34 +61,75 @@ with st.sidebar:
     st.markdown("---")
     btn_ajouter_carnet = st.button("🔄 Charger / Actualiser carnet", type="primary", width="stretch")
 
-# ── Vérifier que df_pivot existe ─────────────────────────────────────────────
-if 'df_pivot' not in st.session_state:
-    st.warning("⚠️ Aucune donnée LPC — lancez d'abord la page **📊 Pivot Prévision** et cliquez sur **LANCER**.")
-    st.stop()
+# ── Charger le consolidé — session d'abord, sinon base ───────────────────────
+def charger_consolide_depuis_base():
+    """Fallback : lire le consolidé validé depuis T_PREVISION_FICHIERS."""
+    try:
+        import pyodbc
+        from io import BytesIO
+        conn_str = (
+            "DRIVER={ODBC Driver 17 for SQL Server};"
+            "SERVER=W25-DWDI;DATABASE=master;Trusted_Connection=yes;"
+            "Connect Timeout=300;"
+        )
+        conn = pyodbc.connect(conn_str, timeout=60)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT TOP 1 Fichier FROM [dbo].[T_PREVISION_FICHIERS]
+            WHERE Source = 'CONSOLIDE_VALIDE'
+            ORDER BY DATE_MODIF DESC
+        """)
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        df = pd.read_excel(BytesIO(bytes(row[0])))
+        df.columns = [str(c) for c in df.columns]
+        return df
+    except Exception as e:
+        print(f"Erreur chargement consolidé depuis base : {e}")
+        return None
 
-df_lpc = st.session_state['df_pivot'].copy()
+if 'df_consolide' in st.session_state:
+    df_lpc = st.session_state['df_consolide'].copy()
+    st.sidebar.success("✅ Données depuis la session (page 02)")
+else:
+    df_lpc = charger_consolide_depuis_base()
+    if df_lpc is not None:
+        st.sidebar.info("📦 Données chargées depuis la base SQL")
+    else:
+        st.warning(
+            "⚠️ Aucune donnée — allez sur la page **📂 Dépôt & Agrégation**, "
+            "agrégez les fichiers et cliquez sur **✅ Valider & Sauvegarder**."
+        )
+        st.stop()
 
-# ── Préparer LPC : ajouter colonnes ORIGINE + CODE_CLIENT ────────────────────
+# ── Préparer : ajouter colonnes ORIGINE + CODE_CLIENT ────────────────────────
 wk_lpc = wk_cols_from_df(df_lpc)
 
-# CODE_CLIENT depuis colonne directe si dispo, sinon depuis PROGRAMME
-if 'CODE_CLIENT' in df_lpc.columns and df_lpc['CODE_CLIENT'].astype(str).str.strip().replace('0','').ne('').any():
-    df_lpc['CODE_CLIENT'] = df_lpc['CODE_CLIENT'].astype(str).str.strip()
-elif 'PROGRAMME' in df_lpc.columns:
+# Toujours extraire depuis PROGRAMME en priorité (format CODE_PERIODE, ex: 0288_2622)
+if 'PROGRAMME' in df_lpc.columns:
     df_lpc['CODE_CLIENT'] = df_lpc['PROGRAMME'].apply(extract_code_client).astype(str)
+elif 'CODE_CLIENT' in df_lpc.columns:
+    df_lpc['CODE_CLIENT'] = df_lpc['CODE_CLIENT'].astype(str).str.strip()
 else:
     df_lpc['CODE_CLIENT'] = ''
 
-df_lpc['ORIGINE'] = 'LPC'
+# Nettoyer les codes clients mal formés (ex: 676.0 → 676)
+df_lpc['CODE_CLIENT'] = df_lpc['CODE_CLIENT'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
 
-# Colonnes méta LPC disponibles
-META_LPC_COLS = ['CODE_CLIENT', 'ORIGINE', 'PROGRAMME', 'REF_ARTICLE_SERTA',
-                 'REF_ARTICLE_CLIENT', 'UP_PRINCIPALE', 'CODE_SELECTION',
-                 'QTE_UC', 'QTE_MOQ', 'QTE_TOTALE']
+if 'ORIGINE' not in df_lpc.columns:
+    if 'Source' in df_lpc.columns:
+        df_lpc['ORIGINE'] = df_lpc['Source'].map(
+            {'LASERNET': 'LPC', 'HORS_LASERNET': 'MANUEL'}
+        ).fillna('LPC')
+    else:
+        df_lpc['ORIGINE'] = 'LPC'
 
-# Construire les couples LPC pour filtrer carnet ET manuels
+# Couples couverts (LPC + Hors Lasernet) → le carnet ne complète que ce qui manque
 couples_lpc = set(
-    df_lpc['CODE_CLIENT'].astype(str).str.strip() + '|' + df_lpc['REF_ARTICLE_SERTA'].astype(str).str.strip()
+    df_lpc['CODE_CLIENT'].astype(str).str.strip() + '|' +
+    df_lpc['REF_ARTICLE_SERTA'].astype(str).str.strip()
 )
 
 # ── Charger carnet ────────────────────────────────────────────────────────────
@@ -99,9 +142,9 @@ def charger_carnet(couples_lpc, date_du, date_au):
         with engine.connect() as conn:
             df = pd.read_sql(text("""
                 SELECT
-                    SERTA_SO_CLIENT_CODE            AS CODE_CLIENT,
-                    ITEM_REF                        AS REF_ARTICLE_SERTA,
-                    ITEM_CLIENT_REF                 AS REF_ARTICLE_CLIENT,
+                    CAST(SERTA_SO_CLIENT_CODE AS VARCHAR(50))      AS CODE_CLIENT,
+                    CAST(ITEM_REF AS VARCHAR(50))                  AS REF_ARTICLE_SERTA,
+                    CAST(ITEM_CLIENT_REF AS VARCHAR(100))          AS REF_ARTICLE_CLIENT,
                     ITEM_MAIN_PRODUCTION_UNIT       AS UP_PRINCIPALE,
                     ITEM_ORDER_MIN_QTY              AS QTE_MOQ,
                     ITEM_PACKAGED_UNIT_QTY          AS QTE_UC,
@@ -134,12 +177,18 @@ def charger_carnet(couples_lpc, date_du, date_au):
     if df.empty:
         return pd.DataFrame()
 
-    # Garder uniquement couples ABSENTS des LPC
-    df['CODE_CLIENT']       = df['CODE_CLIENT'].astype(str).str.strip()
-    df['REF_ARTICLE_SERTA'] = df['REF_ARTICLE_SERTA'].astype(str).str.strip()
+    # Garder uniquement couples ABSENTS du consolidé
+    df['CODE_CLIENT']       = df['CODE_CLIENT'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+    df['REF_ARTICLE_SERTA'] = df['REF_ARTICLE_SERTA'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+    # Exclure codes groupe (GRP...)
+    df = df[~df['CODE_CLIENT'].str.startswith('GRP')]
+    if df.empty:
+        return pd.DataFrame()
+
     # Calculer besoin retard/encours AVANT le filtre couples
     df_retard  = df[df['CLIENT_ACK_DATE'].dt.date <  date_du]
     df_encours = df[(df['CLIENT_ACK_DATE'].dt.date >= date_du) & (df['CLIENT_ACK_DATE'].dt.date <= date_au)]
+
     df['_COUPLE'] = df['CODE_CLIENT'] + '|' + df['REF_ARTICLE_SERTA']
     df = df[~df['_COUPLE'].isin(couples_lpc)].drop(columns=['_COUPLE'])
 
@@ -181,7 +230,6 @@ def charger_carnet(couples_lpc, date_du, date_au):
     return pivot
 
 
-
 def charger_suivi_carnet(date_prevision, date_ventilation):
     from sqlalchemy import text
     engine = get_engine()
@@ -216,7 +264,65 @@ def charger_suivi_carnet(date_prevision, date_ventilation):
         st.warning(f"Suivi expédition non disponible : {e}")
         return pd.DataFrame()
 
-# ── Fusionner LPC + CARNET ────────────────────────────────────────────────────
+
+def charger_facture_recent_hors_couverture(couples_couverts, date_prevision):
+    """
+    Capture les couples CODE_CLIENT|REF_ARTICLE_SERTA facturés/expédiés récemment
+    (fenêtre ±1 semaine autour de la date de prévision) qui ne sont couverts
+    ni par un programme LPC actif, ni par une ligne carnet ouverte.
+    Comble le trou : commande facturée (sortie du carnet) mais pas encore
+    de nouveau programme enregistré pour la suite.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    if engine is None:
+        return pd.DataFrame()
+    try:
+        date_debut = (date_prevision - timedelta(weeks=1)).strftime('%Y-%m-%d')
+        date_fin   = (date_prevision + timedelta(weeks=1)).strftime('%Y-%m-%d')
+        with engine.connect() as conn:
+            df = pd.read_sql(text(f"""
+                SELECT
+                    CODE_CLIENT,
+                    REF_ARTICLE_SERTA,
+                    SUM(QTE_EXPEDIEE) AS QTE_FACTUREE_RECENTE,
+                    MAX(DATE_FACTURE) AS DERNIERE_FACTURE
+                FROM [master].[dbo].[V_EXPEDITION_SUIVI]
+                WHERE DATE_FACTURE IS NOT NULL
+                  AND DATE_FACTURE >= '{date_debut}'
+                  AND DATE_FACTURE <= '{date_fin}'
+                GROUP BY CODE_CLIENT, REF_ARTICLE_SERTA
+            """), conn)
+    except Exception as e:
+        st.warning(f"Recherche facturé récent non disponible : {e}")
+        return pd.DataFrame()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df['CODE_CLIENT']       = df['CODE_CLIENT'].astype(str).str.strip()
+    df['REF_ARTICLE_SERTA'] = df['REF_ARTICLE_SERTA'].astype(str).str.strip()
+    df['_COUPLE'] = df['CODE_CLIENT'] + '|' + df['REF_ARTICLE_SERTA']
+
+    # Ne garder que les couples NON couverts par LPC ni carnet
+    df = df[~df['_COUPLE'].isin(couples_couverts)].drop(columns=['_COUPLE'])
+    if df.empty:
+        return pd.DataFrame()
+
+    df['ORIGINE']        = 'FACTURE_RECENTE'
+    df['PROGRAMME']      = ''
+    df['CODE_SELECTION'] = ''
+    df['REF_ARTICLE_CLIENT'] = ''
+    df['UP_PRINCIPALE']  = ''
+    df['QTE_UC']         = 0
+    df['QTE_MOQ']        = 0
+    df['QTE_TOTALE']     = df['QTE_FACTUREE_RECENTE']
+
+    return df
+
+
+
+# ── Fusionner consolidé + CARNET ─────────────────────────────────────────────
 if btn_ajouter_carnet:
     with st.spinner("⏳ Chargement carnet de commande..."):
         df_carnet = charger_carnet(couples_lpc, date_filtre_du, date_filtre_au)
@@ -224,32 +330,33 @@ if btn_ajouter_carnet:
         date_vent = st.session_state.get('date_ventilation', date_filtre_au)
         df_suivi  = charger_suivi_carnet(date_prev, date_vent)
 
-    # Manuels filtrés — même logique que carnet (couples absents du LPC)
-    df_manuels_filtres = pd.DataFrame()
-    if 'df_manuels' in st.session_state:
-        df_m = st.session_state['df_manuels'].copy()
-        df_m['CODE_CLIENT']       = df_m['CODE_CLIENT'].astype(str).str.strip()
-        df_m['REF_ARTICLE_SERTA'] = df_m['REF_ARTICLE_SERTA'].astype(str).str.strip()
-        df_m['_COUPLE'] = df_m['CODE_CLIENT'] + '|' + df_m['REF_ARTICLE_SERTA']
-        df_manuels_filtres = df_m[~df_m['_COUPLE'].isin(couples_lpc)].drop(columns=['_COUPLE'])
-        wk_m = wk_cols_from_df(df_manuels_filtres)
-        wk_m_range = [c for c in wk_m if wk_label_to_date(c) is not None
-                      and date_filtre_du <= wk_label_to_date(c) <= date_filtre_au]
-        meta_m = [c for c in df_manuels_filtres.columns if c not in wk_m]
-        if wk_m_range:
-            df_manuels_filtres = df_manuels_filtres[meta_m + wk_m_range]
-        for c in wk_cols_from_df(df_manuels_filtres):
-            df_manuels_filtres[c] = pd.to_numeric(df_manuels_filtres[c], errors='coerce').fillna(0)
-
     frames_all = [df_lpc]
-    if not df_manuels_filtres.empty:
-        st.success(f"✅ {len(df_manuels_filtres)} lignes Hors Lasernet ajoutées (ORIGINE=MANUEL)")
-        frames_all.append(df_manuels_filtres)
     if df_carnet.empty:
         st.info("ℹ️ Aucune ligne carnet à ajouter — tous les couples sont couverts.")
     else:
         st.success(f"✅ {len(df_carnet)} lignes carnet ajoutées")
         frames_all.append(df_carnet)
+
+    # Couples déjà couverts par LPC + CARNET (avant ajout du facturé récent)
+    couples_lpc_carnet = set(couples_lpc)
+    if not df_carnet.empty:
+        couples_lpc_carnet |= set(
+            df_carnet['CODE_CLIENT'].astype(str).str.strip() + '|' +
+            df_carnet['REF_ARTICLE_SERTA'].astype(str).str.strip()
+        )
+
+    with st.spinner("⏳ Recherche du facturé récent hors couverture..."):
+        df_facture_recent = charger_facture_recent_hors_couverture(couples_lpc_carnet, date_prev)
+
+    if df_facture_recent.empty:
+        st.info("ℹ️ Aucune référence facturée récemment hors couverture.")
+    else:
+        st.warning(
+            f"⚠️ {len(df_facture_recent)} référence(s) facturée(s) récemment "
+            "(±1 semaine autour de la date de prévision) sans programme actif ni carnet ouvert — ajoutées."
+        )
+        frames_all.append(df_facture_recent)
+
     df_all = pd.concat(
         [f.dropna(axis=1, how='all') for f in frames_all],
         ignore_index=True, sort=False)
@@ -267,30 +374,26 @@ if btn_ajouter_carnet:
             if col not in df_c.columns:
                 df_c[col] = 0
             df_c[col] = pd.to_numeric(df_c[col], errors='coerce').fillna(0).astype(int)
-        # QTE_CUTOFF_RETARD
         df_c['QTE_CUTOFF_RETARD_SC']   = df_c['QTE_BESOIN_CLIENT_RETARD_SC'] + df_c['QTE_EN_TRANSITE_RETARD_SC']
-        # QTE_CUTOFF_PREVISION
         df_c['QTE_CUTOFF_PREVISION_SC'] = df_c['QTE_EN_TRANSITE_ENCOURS_SC'] + df_c['QTE_FACTUREE_ENCOURS_SC'] + df_c['QTE_BESOIN_CLIENT_ENCOURS_SC']
         df_all = pd.concat([
             df_all[~mask].dropna(axis=1, how='all'),
             df_c.dropna(axis=1, how='all')
         ], ignore_index=True, sort=False)
 
-    # Forcer types texte pour éviter erreur Arrow
+    # Forcer types texte
     for col in ['PROGRAMME', 'CODE_SELECTION', 'ORIGINE', 'CODE_CLIENT',
                 'SERTA_SO_CLIENT_GROUP_NAME', 'SERTA_SO_CLIENT_NAME', 'SALES_ADMINISTRATION_PERSON']:
         if col in df_all.columns:
             df_all[col] = df_all[col].fillna('').astype(str)
-    # QTE_TOTALE mixte str/int → numérique
     if 'QTE_TOTALE' in df_all.columns:
         df_all['QTE_TOTALE'] = pd.to_numeric(df_all['QTE_TOTALE'], errors='coerce').fillna(0)
 
-    # Remplir NaN dans colonnes semaines
     wk_all = wk_cols_from_df(df_all)
     for c in wk_all:
         df_all[c] = pd.to_numeric(df_all[c], errors='coerce').fillna(0)
 
-    # Filtrer les colonnes semaines hors plage [date_du, date_au]
+    # Filtrer colonnes semaines dans plage
     wk_in_range = [c for c in wk_all
                    if wk_label_to_date(c) is not None
                    and date_filtre_du <= wk_label_to_date(c) <= date_filtre_au]
@@ -326,19 +429,18 @@ if btn_ajouter_carnet:
 
     st.session_state['df_03'] = df_all
 
-# ── Si pas encore chargé avec carnet, afficher juste le LPC ──────────────────
+# ── Si pas encore chargé avec carnet ─────────────────────────────────────────
 if 'df_03' not in st.session_state:
-    # Premier affichage : montrer LPC seul avec message
     df_lpc_disp = df_lpc.copy()
     for col in ['PROGRAMME', 'CODE_CLIENT', 'ORIGINE']:
         if col in df_lpc_disp.columns:
             df_lpc_disp[col] = df_lpc_disp[col].fillna('').astype(str)
-    st.info("ℹ️ Affichage LPC uniquement. Cliquez sur **🔄 Charger / Actualiser carnet** pour ajouter le carnet de commande.")
+    st.info("ℹ️ Affichage consolidé uniquement. Cliquez sur **🔄 Charger / Actualiser carnet** pour ajouter le carnet.")
     df_aff = df_lpc_disp
 else:
     df_aff = st.session_state['df_03'].copy()
 
-# ── Définir colonnes méta et semaines ────────────────────────────────────────
+# ── Colonnes méta et semaines ─────────────────────────────────────────────────
 META_ALL = ['CODE_CLIENT', 'REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT', 'ORIGINE',
             'PROGRAMME', 'HORIZON_PROGRAMME', 'UP_PRINCIPALE', 'CODE_SELECTION',
             'QTE_UC', 'QTE_MOQ', 'QTE_TOTALE',
@@ -366,15 +468,17 @@ wk_cols = [c for c in wk_cols if _wk_ok(c)]
 
 # ── Métriques ─────────────────────────────────────────────────────────────────
 nb_lpc    = len(df_aff[df_aff['ORIGINE'] == 'LPC'])    if 'ORIGINE' in df_aff.columns else len(df_aff)
-nb_manuel = len(df_aff[df_aff['ORIGINE'] == 'MANUEL']) if 'ORIGINE' in df_aff.columns else 0
+nb_manuel = len(df_aff[df_aff['ORIGINE'].isin(['MANUEL','HORS_LASERNET'])]) if 'ORIGINE' in df_aff.columns else 0
 nb_carnet = len(df_aff[df_aff['ORIGINE'] == 'CARNET']) if 'ORIGINE' in df_aff.columns else 0
+nb_facture_recente = len(df_aff[df_aff['ORIGINE'] == 'FACTURE_RECENTE']) if 'ORIGINE' in df_aff.columns else 0
 
-c1, c2, c3, c4, c5 = st.columns(5)
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("Lignes LPC",           nb_lpc)
 c2.metric("Lignes Hors Lasernet", nb_manuel)
 c3.metric("Lignes CARNET",        nb_carnet)
-c4.metric("Semaines",             len(wk_cols))
-c5.metric("Refs SERTA",           df_aff['REF_ARTICLE_SERTA'].nunique() if 'REF_ARTICLE_SERTA' in df_aff.columns else 0)
+c4.metric("Facturé récent",       nb_facture_recente)
+c5.metric("Semaines",             len(wk_cols))
+c6.metric("Refs SERTA",           df_aff['REF_ARTICLE_SERTA'].nunique() if 'REF_ARTICLE_SERTA' in df_aff.columns else 0)
 if wk_cols:
     st.caption(f"📅 {wk_cols[0]} → {wk_cols[-1]}")
 
@@ -384,7 +488,8 @@ st.markdown("---")
 with st.expander("🔍 Filtres", expanded=False):
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        f_origine = st.multiselect("Origine", options=['LPC', 'MANUEL', 'CARNET'], default=['LPC', 'MANUEL', 'CARNET'])
+        f_origine = st.multiselect("Origine", options=['LPC', 'MANUEL', 'HORS_LASERNET', 'CARNET', 'FACTURE_RECENTE'],
+                                   default=['LPC', 'MANUEL', 'HORS_LASERNET', 'CARNET', 'FACTURE_RECENTE'])
     with col2:
         f_client  = st.multiselect("Code client",
             options=sorted(df_aff['CODE_CLIENT'].dropna().astype(str).unique()) if 'CODE_CLIENT' in df_aff.columns else [])
@@ -414,12 +519,14 @@ with tab2:
         rows_g = []
         for orig, grp in df_disp.groupby('ORIGINE'):
             for wk in wk_cols:
-                rows_g.append({'SEMAINE': wk, 'QTE': grp[wk].sum(), 'ORIGINE': orig})
+                if wk in grp.columns:
+                    rows_g.append({'SEMAINE': wk, 'QTE': grp[wk].sum(), 'ORIGINE': orig})
         df_g = pd.DataFrame(rows_g)
         if not df_g.empty:
             fig = px.bar(df_g, x='SEMAINE', y='QTE', color='ORIGINE', barmode='group',
-                         title="QTY par semaine — LPC vs Carnet",
-                         color_discrete_map={'LPC': '#1F4E79', 'CARNET': '#C00000'})
+                         title="QTY par semaine — LPC vs Hors Lasernet vs Carnet",
+                         color_discrete_map={'LPC': '#1F4E79', 'MANUEL': '#375623',
+                                             'HORS_LASERNET': '#375623', 'CARNET': '#C00000'})
             st.plotly_chart(fig, width="stretch")
 
 with tab3:

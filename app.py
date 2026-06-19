@@ -9,5 +9,9 @@ pg = st.navigation([
     st.Page("pages/03_agregation.py",       title="Agrégation LPC",      icon="📦"),
     st.Page("pages/05_nouveaux_projets.py", title="Nouveaux Projets",    icon="🚀"),
     st.Page("pages/04_consolide.py",        title="Consolidé",           icon="🔀"),
+    st.Page("pages/06_pic.py",          title="PIC Mensuel",         icon="📅"),
+    st.Page("pages/07_pic_dashboard.py",    title="PIC Dashboard",       icon="📈"),
+
 ])
+
 pg.run()
