@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import text
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
-from shared import get_engine, logo_sidebar, to_excel_bytes
+from shared import get_engine, logo_sidebar, to_excel_bytes, plafond_arc
 
 SC_COLS = [
     'SERTA_SO_CLIENT_CODE',
@@ -21,9 +21,11 @@ SC_COLS = [
     'ITEM_ORDER_MIN_QTY',
     'ITEM_PACKAGED_UNIT_QTY',
     'SERTA_SO_NUM',
+    'CLIENT_ORDER_NUM',           # AJOUT : numero de commande client
     'CLIENT_ACK_DATE',
     'SERTA_SO_STILL_TO_BE_DELIVERED_QTY',
     'SERTA_SO_STILL_TO_BE_DELIVERED_TURNOVER',
+    'SERTA_SO_STATUS_MIN',        # AJOUT : statut d'expedition minimum
 ]
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -41,7 +43,7 @@ def load_supply_chain():
         if df.empty:
             return df
 
-        # CLIENT_ACK_DATE → datetime puis semaine ISO S26-09
+        # CLIENT_ACK_DATE -> datetime puis semaine ISO S26-09
         df['CLIENT_ACK_DATE'] = pd.to_datetime(df['CLIENT_ACK_DATE'], errors='coerce')
         df['SEMAINE'] = df['CLIENT_ACK_DATE'].apply(
             lambda d: f"S{str(d.isocalendar()[0])[2:]}-{d.isocalendar()[1]:02d}"
@@ -50,9 +52,13 @@ def load_supply_chain():
 
         for col in ['SERTA_SO_STILL_TO_BE_DELIVERED_QTY',
                     'SERTA_SO_STILL_TO_BE_DELIVERED_TURNOVER',
-                    'ITEM_ORDER_MIN_QTY', 'ITEM_PACKAGED_UNIT_QTY']:
+                    'ITEM_ORDER_MIN_QTY', 'ITEM_PACKAGED_UNIT_QTY',
+                    'SERTA_SO_STATUS_MIN']:                      # AJOUT dans le cast numerique
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        if 'CLIENT_ORDER_NUM' in df.columns:                     # AJOUT nettoyage texte
+            df['CLIENT_ORDER_NUM'] = df['CLIENT_ORDER_NUM'].fillna('').astype(str).str.strip()
 
         return df
     except Exception as e:
@@ -83,6 +89,7 @@ def agreger_par_semaine(df):
                   QTE_FERME=('SERTA_SO_STILL_TO_BE_DELIVERED_QTY',     'sum'),
                   CA_FERME =('SERTA_SO_STILL_TO_BE_DELIVERED_TURNOVER', 'sum'),
                   NB_OV    =('SERTA_SO_NUM',                            'nunique'),
+                  STATUT_MIN=('SERTA_SO_STATUS_MIN',                    'min'),   # AJOUT
               )
               .reset_index()
               .sort_values(['ITEM_CLIENT_REF', 'SEMAINE']))
@@ -115,6 +122,32 @@ if 'df_sc' not in st.session_state:
 
 df_sc = st.session_state['df_sc']
 
+# AJOUT : exclure les codes clients groupe (GRP...) -- meme filtre que celui
+# deja applique dans 03_Agregation.py sur le reste du pipeline carnet, absent
+# ici jusqu'a present. Ces codes representent des agregats, pas de vraies
+# commandes client.
+if 'SERTA_SO_CLIENT_CODE' in df_sc.columns:
+    _avant_grp = len(df_sc)
+    df_sc = df_sc[~df_sc['SERTA_SO_CLIENT_CODE'].astype(str).str.startswith('GRP')]
+    _retire_grp = _avant_grp - len(df_sc)
+    if _retire_grp:
+        st.caption(f"🧹 {_retire_grp:,} ligne(s) exclue(s) : code client groupe (GRP...).")
+
+# Règle métier ARC carnet : ne garder que les lignes dont l'ARC (CLIENT_ACK_DATE)
+# est au plus tard au plafond -- ≥ fin 2027, mais au moins 1 an devant la date du
+# jour (shared.plafond_arc, MÊME plafond que la page Agrégation pour ne pas
+# diverger). Les lignes sans ARC (NaT) sont conservées : rien à plafonner.
+_plafond_arc = plafond_arc()
+if 'CLIENT_ACK_DATE' in df_sc.columns:
+    _avant = len(df_sc)
+    df_sc = df_sc[df_sc['CLIENT_ACK_DATE'].isna()
+                  | (df_sc['CLIENT_ACK_DATE'].dt.date <= _plafond_arc)]
+    _retire = _avant - len(df_sc)
+    if _retire:
+        st.caption(f"⚠️ {_retire:,} ligne(s) exclue(s) : ARC au-delà du "
+                   f"{_plafond_arc.strftime('%d/%m/%Y')} (règle métier ARC carnet : "
+                   f"≥ fin 2027, au moins 1 an devant).")
+
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Refs client",  df_sc['ITEM_CLIENT_REF'].nunique()  if 'ITEM_CLIENT_REF' in df_sc.columns else 0)
 c2.metric("Refs SERTA",   df_sc['ITEM_REF'].nunique()         if 'ITEM_REF'        in df_sc.columns else 0)
@@ -126,7 +159,7 @@ c4.metric("QTY restante", f"{total_qty:,.0f}")
 st.markdown("---")
 
 with st.expander("🔍 Filtres", expanded=True):
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         f_groupe = st.multiselect("Groupe client",
             options=sorted(df_sc['SERTA_SO_CLIENT_GROUP_NAME'].dropna().unique())
@@ -139,11 +172,16 @@ with st.expander("🔍 Filtres", expanded=True):
         f_ref = st.multiselect("Ref SERTA",
             options=sorted(df_sc['ITEM_REF'].dropna().unique())
             if 'ITEM_REF' in df_sc.columns else [])
+    with col4:                                                    # AJOUT filtre statut
+        f_statut = st.multiselect("Statut expédition",
+            options=sorted(df_sc['SERTA_SO_STATUS_MIN'].dropna().unique())
+            if 'SERTA_SO_STATUS_MIN' in df_sc.columns else [])
 
 df_filt = df_sc.copy()
 if f_groupe: df_filt = df_filt[df_filt['SERTA_SO_CLIENT_GROUP_NAME'].isin(f_groupe)]
 if f_up:     df_filt = df_filt[df_filt['ITEM_MAIN_PRODUCTION_UNIT'].isin(f_up)]
 if f_ref:    df_filt = df_filt[df_filt['ITEM_REF'].isin(f_ref)]
+if f_statut: df_filt = df_filt[df_filt['SERTA_SO_STATUS_MIN'].isin(f_statut)]
 
 tab1, tab2, tab3 = st.tabs(["📋 Détail lignes", "📦 Agrégation par semaine", "💾 Export"])
 

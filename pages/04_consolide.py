@@ -11,7 +11,65 @@ st.title("📊 Consolidée — Somme par Référence")
 if get_engine() is None:
     st.stop()
 
-# ── Sidebar minimal ───────────────────────────────────────────────────────────
+# AJOUT : verification du vrai groupe article (V_ART_STANDARD), pour pouvoir
+# filtrer PDR/composants de facon OPTIONNELLE en fin de pipeline (case a
+# cocher plus bas). Contrairement a un essai precedent, ce filtre n'est PLUS
+# applique automatiquement sur le programme (LPC) des le chargement -- une
+# verification a montre que certaines refs PDR/composant SONT malgre tout
+# suivies en prevision par la reference externe (9 exemples confirmes,
+# clients varies, aucun motif systematique trouve). Le filtre est donc
+# laisse au choix de l'utilisateur, applicable/retirable a la volee pour
+# comparer les deux vues.
+def charger_groupe_article(refs_tuple):
+    from sqlalchemy import text
+    engine = get_engine()
+    if engine is None or not refs_tuple:
+        return pd.DataFrame(columns=['REF_ARTICLE_SERTA', 'VRAI_GROUPE_ARTICLE'])
+
+    TAILLE_LOT = 100
+    lots = [refs_tuple[i:i+TAILLE_LOT] for i in range(0, len(refs_tuple), TAILLE_LOT)]
+    resultats = []
+    erreurs = 0
+    premiere_erreur = None
+    progress = st.progress(0, text="Vérification du groupe article...")
+    for i, lot in enumerate(lots):
+        # Chaque element enveloppe individuellement par '' ... '' (echappement
+        # correct pour OPENQUERY) -- meme correctif que celui applique cote
+        # Agregation apres le bug de syntaxe SQL trouve precedemment.
+        refs_echappees = ["''" + r.replace("'", "''''") + "''" for r in lot]
+        refs_sql = ", ".join(refs_echappees)
+        try:
+            with engine.connect() as conn:
+                df_lot = pd.read_sql(text(f"""
+                    SELECT *
+                    FROM OPENQUERY([SRV-MSSQLDB], '
+                        SELECT REF_ARTICLE, CODE_GROUPE_ARTICLE
+                        FROM DW.PRODUCTION.V_ART_STANDARD
+                        WHERE REF_ARTICLE IN ({refs_sql})
+                    ')
+                """), conn)
+            df_lot.columns = ['REF_ARTICLE_SERTA', 'VRAI_GROUPE_ARTICLE']
+            resultats.append(df_lot)
+        except Exception as e:
+            erreurs += 1
+            if premiere_erreur is None:
+                premiere_erreur = f"[{type(e).__name__}] {e}"
+        progress.progress((i+1)/len(lots), text=f"Vérification groupe article... lot {i+1}/{len(lots)}")
+    progress.empty()
+
+    if erreurs > 0:
+        st.warning(f"⚠️ {erreurs}/{len(lots)} lot(s) de vérification groupe article ont échoué.")
+        with st.expander("🔍 Détail de la première erreur"):
+            st.code(premiere_erreur)
+    if not resultats:
+        return pd.DataFrame(columns=['REF_ARTICLE_SERTA', 'VRAI_GROUPE_ARTICLE'])
+
+    df = pd.concat(resultats, ignore_index=True)
+    df['REF_ARTICLE_SERTA'] = df['REF_ARTICLE_SERTA'].astype(str).str.strip()
+    return df.drop_duplicates('REF_ARTICLE_SERTA')
+
+GROUPES_PDR = ['PDR', 'PFPDR', 'MAUNIT', 'MAJOIN']
+
 with st.sidebar:
     logo_sidebar()
     st.header("⚙️ Info")
@@ -22,35 +80,114 @@ with st.sidebar:
         "(tous clients et toutes origines confondus).\n\n"
         "👈 Lancez d'abord la page **Agrégation** pour alimenter cette vue."
     )
+    st.markdown("---")
+    # AJOUT : integration des projets rendue OPTIONNELLE (case a cocher,
+    # DESACTIVEE par defaut) -- avant, les projets etaient fusionnes
+    # automatiquement, sans que ce soit demande. Desactive par defaut car
+    # cette categorie n'a pas d'equivalent chez Sophie (toujours classee
+    # "Ref SANS encours" de son cote, jamais en prevision), donc son ajout
+    # automatique faussait les comparaisons.
+    inclure_projets = st.checkbox(
+        "Inclure les Nouveaux Projets (page 05) dans la consolidation",
+        value=False,
+        help="Désactivé par défaut. Les refs 'PROJET' n'ont pas d'équivalent "
+             "dans le suivi habituel (ex: fichier de référence externe) -- "
+             "à activer seulement si tu veux volontairement les inclure.")
+    st.markdown("---")
+    # AJOUT : filtre PDR/composants optionnel, applique ICI (fin de pipeline,
+    # page consolidee) plutot qu'a la source -- permet de basculer entre les
+    # deux vues pour comparer, au lieu de trancher une fois pour toutes des
+    # la page Agregation.
+    filtrer_pdr = st.checkbox(
+        "Filtrer les PDR/composants du programme (LPC)",
+        value=False,
+        help="Désactivé par défaut. Exclut les références classées "
+             "PDR/PFPDR/MAUNIT/MAJOIN (vrai CODE_GROUPE_ARTICLE) côté "
+             "programme. À activer pour comparer avec/sans ce périmètre -- "
+             "certaines refs PDR sont malgré tout suivies par la référence "
+             "externe, aucune règle systématique connue pour les distinguer.")
 
-# ── Vérifier que df_03 existe ─────────────────────────────────────────────────
 if 'df_03' not in st.session_state:
     st.warning("⚠️ Aucune donnée — lancez d'abord la page **📦 Agrégation** et cliquez sur **LANCER**.")
     st.stop()
 
 df_src = st.session_state['df_03'].copy()
 
+# AJOUT : application du filtre PDR optionnel, uniquement sur les lignes LPC
+# (le carnet exclut deja PDR a la source, pas la peine d'y retoucher ici).
+if filtrer_pdr and 'ORIGINE' in df_src.columns:
+    refs_lpc = tuple(sorted(
+        df_src.loc[df_src['ORIGINE'].isin(['LPC', 'MANUEL']), 'REF_ARTICLE_SERTA']
+        .dropna().astype(str).str.strip().unique()
+    ))
+    df_groupe = charger_groupe_article(refs_lpc)
+    if not df_groupe.empty:
+        nb_avant = len(df_src)
+        df_src = df_src.merge(df_groupe, on='REF_ARTICLE_SERTA', how='left')
+        est_lpc = df_src['ORIGINE'].isin(['LPC', 'MANUEL'])
+        est_pdr = df_src['VRAI_GROUPE_ARTICLE'].isin(GROUPES_PDR)
+        a_retirer = est_lpc & est_pdr
+        nb_retirees = a_retirer.sum()
+        df_src = df_src[~a_retirer].drop(columns=['VRAI_GROUPE_ARTICLE'])
+        if nb_retirees > 0:
+            st.info(f"🧹 {nb_retirees} ligne(s) programme retirée(s) (PDR/composants).")
+
+# ── Fusionner les projets (nouveaux + doublons) AVEC la source AVANT
+# consolidation -- SEULEMENT SI la case "Inclure les Nouveaux Projets" est
+# cochee (desactivee par defaut, voir sidebar). Quand active : une ref en
+# commun entre programme/carnet ET projet ressort comme UNE SEULE ligne
+# consolidee, avec ORIGINE = "LPC/PROJET" (ou "CARNET/PROJET") et les
+# quantites REELLEMENT SOMMEES -- pas deux lignes separees.
+frames_source = [df_src]
+
+if inclure_projets:
+    df_proj_new = st.session_state.get('df_projets_nouveaux', pd.DataFrame())
+    if not df_proj_new.empty:
+        frames_source.append(df_proj_new)
+
+    df_proj_dbl = st.session_state.get('df_projets_doublons', pd.DataFrame())
+    if not df_proj_dbl.empty:
+        # DOUBLON est un champ propre a la page 05 (juste informatif -- indique que
+        # cette ref existait deja avant l'ajout du projet). On le retire ici car il
+        # n'a pas de sens au niveau de df_src (donnees brutes par client+ref) --
+        # ce sera de toute facon visible via ORIGINE = "LPC/PROJET" apres fusion.
+        df_proj_dbl_clean = df_proj_dbl.drop(columns=['DOUBLON'], errors='ignore')
+        frames_source.append(df_proj_dbl_clean)
+
+if len(frames_source) > 1:
+    df_src = pd.concat([f.dropna(axis=1, how='all') for f in frames_source],
+                        ignore_index=True, sort=False)
+    wk_apres_fusion = wk_cols_from_df(df_src)
+    for c in wk_apres_fusion:
+        df_src[c] = pd.to_numeric(df_src[c], errors='coerce').fillna(0)
+    for col_txt in ['CODE_CLIENT', 'PROGRAMME', 'CODE_SELECTION', 'ORIGINE']:
+        if col_txt in df_src.columns:
+            df_src[col_txt] = df_src[col_txt].fillna('').astype(str)
+    nb_new = len(df_proj_new) if not df_proj_new.empty else 0
+    nb_dbl = len(df_proj_dbl) if not df_proj_dbl.empty else 0
+    st.success(f"✅ Projets fusionnés avec la source avant consolidation — "
+               f"{nb_new} nouvelles refs + {nb_dbl} refs en commun (sommées, "
+               f"origine combinée type LPC/PROJET)")
+
 # ── Colonnes méta et semaines ─────────────────────────────────────────────────
 META_SRC = ['CODE_CLIENT', 'REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT', 'ORIGINE',
             'PROGRAMME', 'HORIZON_PROGRAMME', 'UP_PRINCIPALE', 'CODE_SELECTION',
             'QTE_UC', 'QTE_MOQ', 'QTE_TOTALE',
+            'ITEM_GROUP_CODE', 'SERTA_SO_STATUS_MIN', 'CLIENT_ORDER_NUM',
             'SERTA_SO_CLIENT_GROUP_NAME', 'SERTA_SO_CLIENT_NAME', 'SALES_ADMINISTRATION_PERSON',
             'QTE_EN_TRANSITE_RETARD','QTE_BESOIN_CLIENT_RETARD','QTE_CUTOFF_RETARD',
             'QTE_FACTUREE_ENCOURS','QTE_EN_TRANSITE_ENCOURS',
             'QTE_BESOIN_CLIENT_ENCOURS','QTE_CUTOFF_PREVISION',
             'QTE_EN_TRANSITE_RETARD_SC','QTE_BESOIN_CLIENT_RETARD_SC','QTE_CUTOFF_RETARD_SC',
             'QTE_FACTUREE_ENCOURS_SC','QTE_EN_TRANSITE_ENCOURS_SC',
-            'QTE_BESOIN_CLIENT_ENCOURS_SC','QTE_CUTOFF_PREVISION_SC']
+            'QTE_BESOIN_CLIENT_ENCOURS_SC','QTE_CUTOFF_PREVISION_SC',
+            # AJOUT : colonnes propres aux projets (page 05), utiles a garder si presentes
+            'NUM_PROJET', 'STATUT', 'DATE_LIVRAISON_SERIE', 'SUCCESS_RATE', 'QTE_ANNUELLE',
+            'PROJECT_MANAGER', 'SALES_PERSON']
 META_SRC = [c for c in META_SRC if c in df_src.columns]
 wk_cols_src = [c for c in df_src.columns if c not in META_SRC
                and isinstance(c, str) and len(c) == 6 and c[0] == 'S' and c[3] == '-']
 wk_cols_src = sorted(wk_cols_src)
-
-# ── Colonnes méta à garder dans la consolidée (une ligne par ref) ─────────────
-# Priorité LPC pour les colonnes enrichissement
-META_CONSOLIDE = ['REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT', 'UP_PRINCIPALE',
-                  'CODE_SELECTION', 'QTE_MOQ', 'QTE_UC', 'PROGRAMME', 'HORIZON_PROGRAMME']
-META_CONSOLIDE = [c for c in META_CONSOLIDE if c in df_src.columns]
 
 # ── Construction consolidée ───────────────────────────────────────────────────
 @st.cache_data
@@ -58,26 +195,33 @@ def consolider(df_src_json, wk_cols):
     import io
     df = pd.read_json(io.StringIO(df_src_json), orient='split')
 
-    # Pour les colonnes méta : prendre la valeur LPC si dispo, sinon CARNET
-    # On trie pour avoir LPC en premier
-    df_sorted = df.sort_values('ORIGINE', ascending=False)  # LPC avant CARNET
+    QTE_A_SOMMER = [
+        'QTE_EN_TRANSITE_RETARD','QTE_BESOIN_CLIENT_RETARD','QTE_CUTOFF_RETARD',
+        'QTE_FACTUREE_ENCOURS','QTE_EN_TRANSITE_ENCOURS',
+        'QTE_BESOIN_CLIENT_ENCOURS','QTE_CUTOFF_PREVISION',
+        'QTE_EN_TRANSITE_RETARD_SC','QTE_BESOIN_CLIENT_RETARD_SC','QTE_CUTOFF_RETARD_SC',
+        'QTE_FACTUREE_ENCOURS_SC','QTE_EN_TRANSITE_ENCOURS_SC',
+        'QTE_BESOIN_CLIENT_ENCOURS_SC','QTE_CUTOFF_PREVISION_SC',
+    ]
+    QTE_A_SOMMER = [c for c in QTE_A_SOMMER if c in df.columns]
+    for c in QTE_A_SOMMER:
+        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+
+    df_sorted = df.sort_values('ORIGINE', ascending=False)  # LPC avant CARNET/PROJET
 
     meta_agg = {}
     for col in ['REF_ARTICLE_CLIENT', 'UP_PRINCIPALE', 'CODE_SELECTION',
                 'QTE_MOQ', 'QTE_UC', 'PROGRAMME', 'HORIZON_PROGRAMME',
+                'ITEM_GROUP_CODE', 'SERTA_SO_STATUS_MIN', 'CLIENT_ORDER_NUM',
                 'SERTA_SO_CLIENT_GROUP_NAME', 'SERTA_SO_CLIENT_NAME', 'SALES_ADMINISTRATION_PERSON',
-                'QTE_EN_TRANSITE_RETARD','QTE_BESOIN_CLIENT_RETARD','QTE_CUTOFF_RETARD',
-                'QTE_FACTUREE_ENCOURS','QTE_EN_TRANSITE_ENCOURS',
-                'QTE_BESOIN_CLIENT_ENCOURS','QTE_CUTOFF_PREVISION',
-                'QTE_EN_TRANSITE_RETARD_SC','QTE_BESOIN_CLIENT_RETARD_SC','QTE_CUTOFF_RETARD_SC',
-                'QTE_FACTUREE_ENCOURS_SC','QTE_EN_TRANSITE_ENCOURS_SC',
-                'QTE_BESOIN_CLIENT_ENCOURS_SC','QTE_CUTOFF_PREVISION_SC']:
+                'NUM_PROJET', 'STATUT', 'DATE_LIVRAISON_SERIE', 'SUCCESS_RATE', 'QTE_ANNUELLE',
+                'PROJECT_MANAGER', 'SALES_PERSON']:
         if col not in df.columns:
             continue
         meta_agg[col] = df_sorted[df_sorted[col].astype(str).str.strip() != ''].groupby(
             'REF_ARTICLE_SERTA')[col].first()
 
-    # ORIGINE : LPC / MANUEL / CARNET / PROJET ou combinaisons
+    # ORIGINE : LPC / MANUEL / CARNET / PROJET ou combinaisons (ex: LPC/PROJET)
     if 'ORIGINE' in df.columns:
         ORDRE = ['LPC', 'MANUEL', 'CARNET', 'PROJET']
         def calc_origine(series):
@@ -90,42 +234,33 @@ def consolider(df_src_json, wk_cols):
     else:
         origine_map = None
 
-    # Somme des semaines par ref
     wk_present = [c for c in wk_cols if c in df.columns]
     for c in wk_present:
         df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
-    pivot = df.groupby('REF_ARTICLE_SERTA')[wk_present].sum().reset_index()
+    # Semaines ET colonnes QTE_... sommees dans le MEME groupby -- c'est ca qui
+    # garantit que les quantites projet + programme/carnet sont REELLEMENT
+    # additionnees pour une ref en commun, plutot que juxtaposees.
+    pivot = df.groupby('REF_ARTICLE_SERTA')[wk_present + QTE_A_SOMMER].sum().reset_index()
 
-    # Colonnes numériques suivi
-    NUM_COLS = {'QTE_MOQ','QTE_UC','QTE_TOTALE',
-                'QTE_EN_TRANSITE_RETARD','QTE_BESOIN_CLIENT_RETARD','QTE_CUTOFF_RETARD',
-                'QTE_FACTUREE_ENCOURS','QTE_EN_TRANSITE_ENCOURS',
-                'QTE_BESOIN_CLIENT_ENCOURS','QTE_CUTOFF_PREVISION',
-                'QTE_EN_TRANSITE_RETARD_SC','QTE_BESOIN_CLIENT_RETARD_SC','QTE_CUTOFF_RETARD_SC',
-                'QTE_FACTUREE_ENCOURS_SC','QTE_EN_TRANSITE_ENCOURS_SC',
-                'QTE_BESOIN_CLIENT_ENCOURS_SC','QTE_CUTOFF_PREVISION_SC'}
-
-    # Ajouter les colonnes méta
     for col, serie in meta_agg.items():
         mapped = pivot['REF_ARTICLE_SERTA'].map(serie)
-        if col in NUM_COLS:
-            pivot[col] = pd.to_numeric(mapped, errors='coerce').fillna(0)
-        else:
-            pivot[col] = mapped.fillna('').infer_objects(copy=False).astype(str)
+        pivot[col] = mapped.fillna('').infer_objects(copy=False).astype(str)
     if origine_map is not None:
         pivot['ORIGINE'] = pivot['REF_ARTICLE_SERTA'].map(origine_map).fillna('').infer_objects(copy=False).astype(str)
 
-    # Réordonner colonnes
     meta_cols = ['REF_ARTICLE_SERTA','REF_ARTICLE_CLIENT','ORIGINE','UP_PRINCIPALE',
                  'CODE_SELECTION','QTE_MOQ','QTE_UC','PROGRAMME','HORIZON_PROGRAMME',
+                 'ITEM_GROUP_CODE','SERTA_SO_STATUS_MIN','CLIENT_ORDER_NUM',
                  'SERTA_SO_CLIENT_GROUP_NAME','SERTA_SO_CLIENT_NAME','SALES_ADMINISTRATION_PERSON',
                  'QTE_EN_TRANSITE_RETARD','QTE_BESOIN_CLIENT_RETARD','QTE_CUTOFF_RETARD',
                  'QTE_FACTUREE_ENCOURS','QTE_EN_TRANSITE_ENCOURS',
                  'QTE_BESOIN_CLIENT_ENCOURS','QTE_CUTOFF_PREVISION',
                  'QTE_EN_TRANSITE_RETARD_SC','QTE_BESOIN_CLIENT_RETARD_SC','QTE_CUTOFF_RETARD_SC',
                  'QTE_FACTUREE_ENCOURS_SC','QTE_EN_TRANSITE_ENCOURS_SC',
-                 'QTE_BESOIN_CLIENT_ENCOURS_SC','QTE_CUTOFF_PREVISION_SC']
+                 'QTE_BESOIN_CLIENT_ENCOURS_SC','QTE_CUTOFF_PREVISION_SC',
+                 'NUM_PROJET','STATUT','DATE_LIVRAISON_SERIE','SUCCESS_RATE','QTE_ANNUELLE',
+                 'PROJECT_MANAGER','SALES_PERSON']
     meta_cols = [c for c in meta_cols if c in pivot.columns]
     wk_sorted = sorted([c for c in pivot.columns if c not in meta_cols
                         and isinstance(c, str) and len(c) == 6 and c[0] == 'S' and c[3] == '-'])
@@ -133,60 +268,21 @@ def consolider(df_src_json, wk_cols):
 
 df = consolider(df_src.to_json(orient='split'), wk_cols_src)
 
-# ── Intégration nouveaux projets depuis page 05 ───────────────────────────────
-if 'df_projets_nouveaux' in st.session_state or 'df_projets_doublons' in st.session_state:
-    frames_proj = []
-    df_proj_new = st.session_state.get('df_projets_nouveaux', pd.DataFrame())
-    if not df_proj_new.empty:
-        wk_new = sorted([c for c in df_proj_new.columns
-                         if isinstance(c, str) and len(c) == 6 and c[0] == 'S' and c[3] == '-'])
-        for c in wk_new:
-            df_proj_new[c] = pd.to_numeric(df_proj_new[c], errors='coerce').fillna(0)
-        meta_new = [c for c in df_proj_new.columns if c not in wk_new]
-        df_consol_new = df_proj_new.groupby('REF_ARTICLE_SERTA')[wk_new].sum().reset_index()
-        for col in meta_new:
-            if col == 'REF_ARTICLE_SERTA': continue
-            valid = df_proj_new[df_proj_new[col].astype(str).str.strip() != '']
-            if not valid.empty:
-                df_consol_new[col] = df_consol_new['REF_ARTICLE_SERTA'].map(
-                    valid.groupby('REF_ARTICLE_SERTA')[col].first())
-        df_consol_new['DOUBLON'] = False
-        frames_proj.append(df_consol_new)
-    df_proj_dbl = st.session_state.get('df_projets_doublons', pd.DataFrame())
-    if not df_proj_dbl.empty:
-        frames_proj.append(df_proj_dbl)
-    if frames_proj:
-        df = pd.concat([df] + [f.dropna(axis=1, how='all') for f in frames_proj],
-                       ignore_index=True, sort=False)
-        wk_all = sorted([c for c in df.columns
-                         if isinstance(c, str) and len(c) == 6 and c[0] == 'S' and c[3] == '-'])
-        for col_wk in wk_all:
-            df[col_wk] = pd.to_numeric(df[col_wk], errors='coerce').fillna(0)
-        for col_txt in ['PROGRAMME', 'CODE_SELECTION', 'ORIGINE']:
-            if col_txt in df.columns:
-                df[col_txt] = df[col_txt].fillna('').infer_objects(copy=False).astype(str)
-        if 'DOUBLON' not in df.columns:
-            df['DOUBLON'] = False
-        df['DOUBLON'] = df['DOUBLON'].fillna(False).astype(bool)
-        if not df_proj_dbl.empty:
-            refs_doublons = set(df_proj_dbl['REF_ARTICLE_SERTA'].astype(str).unique())
-            df.loc[df['REF_ARTICLE_SERTA'].astype(str).isin(refs_doublons), 'DOUBLON'] = True
-        nb_new = len(df_proj_new) if not df_proj_new.empty else 0
-        nb_dbl = len(df_proj_dbl) if not df_proj_dbl.empty else 0
-        st.success(f"✅ Projets intégrés — {nb_new} nouvelles refs + {nb_dbl} doublons en lignes séparées")
-
-# ── Colonnes semaines telles quelles — pas de cutoff appliqué ───────────────
-
 # ── Sauvegarder pour la page PIC ─────────────────────────────────────────────
-st.session_state['df_consolide'] = df.copy()
+st.session_state['df_consolide_final'] = df.copy()  # CORRIGE : cle dediee, ne
+# doit JAMAIS reutiliser 'df_consolide' -- cette derniere est ecrite par la
+# page 02 (programme brut) et LUE par la page 03 comme source LPC. Ecraser
+# 'df_consolide' ici faisait perdre silencieusement la couverture programme
+# des qu'on visitait cette page une fois, sans aucune action volontaire de
+# l'utilisateur -- bug trouve par comparaison de deux exports consecutifs.
 
 wk_cols = [c for c in df.columns
            if isinstance(c, str) and len(c) == 6 and c[0] == 'S' and c[3] == '-'
            and c[1:3].isdigit() and c[4:6].isdigit()]
 
 import datetime as _dt
-_fdu = st.session_state.get('date_prevision', None)
-_fau = st.session_state.get('date_filtre_au', None)
+_fdu = st.session_state.get('date_carnet_du', None)
+_fau = st.session_state.get('date_carnet_au', None)
 def _wk_ok(col):
     try:
         yy, ww = int('20'+col[1:3]), int(col[4:6])
@@ -199,16 +295,18 @@ def _wk_ok(col):
 wk_cols = [c for c in wk_cols if _wk_ok(c)]
 
 # ── Métriques ─────────────────────────────────────────────────────────────────
-nb_lpc    = df_src[df_src['ORIGINE'] == 'LPC']['REF_ARTICLE_SERTA'].nunique()
-nb_manuel = df_src[df_src['ORIGINE'] == 'MANUEL']['REF_ARTICLE_SERTA'].nunique()
-nb_carnet = df_src[df_src['ORIGINE'] == 'CARNET']['REF_ARTICLE_SERTA'].nunique()
+nb_lpc    = df_src[df_src['ORIGINE'] == 'LPC']['REF_ARTICLE_SERTA'].nunique() if 'ORIGINE' in df_src.columns else 0
+nb_manuel = df_src[df_src['ORIGINE'] == 'MANUEL']['REF_ARTICLE_SERTA'].nunique() if 'ORIGINE' in df_src.columns else 0
+nb_carnet = df_src[df_src['ORIGINE'] == 'CARNET']['REF_ARTICLE_SERTA'].nunique() if 'ORIGINE' in df_src.columns else 0
+nb_projet = df_src[df_src['ORIGINE'] == 'PROJET']['REF_ARTICLE_SERTA'].nunique() if 'ORIGINE' in df_src.columns else 0
 
-c1, c2, c3, c4, c5 = st.columns(5)
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("Refs totales",       len(df))
 c2.metric("dont LPC",           nb_lpc)
 c3.metric("dont Hors Lasernet", nb_manuel)
 c4.metric("dont CARNET",        nb_carnet)
-c5.metric("Semaines",           len(wk_cols))
+c5.metric("dont PROJET",        nb_projet)
+c6.metric("Semaines",           len(wk_cols))
 if wk_cols:
     st.caption(f"📅 {wk_cols[0]} → {wk_cols[-1]}")
 
@@ -216,7 +314,7 @@ st.markdown("---")
 
 # ── Filtres ───────────────────────────────────────────────────────────────────
 with st.expander("🔍 Filtres", expanded=False):
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         f_ref  = st.multiselect("Ref SERTA",
             options=sorted(df['REF_ARTICLE_SERTA'].dropna().astype(str).unique()))
@@ -232,20 +330,12 @@ with st.expander("🔍 Filtres", expanded=False):
         f_origine = st.multiselect("Origine",
             options=sorted(df['ORIGINE'].dropna().replace('', None).dropna().astype(str).unique())
             if 'ORIGINE' in df.columns else [])
-    with col5:
-        f_doublon = st.selectbox("Doublons",
-            options=['Tous', 'Doublons uniquement', 'Sans doublons'], index=0)
 
 df_disp = df.copy()
 if f_ref:     df_disp = df_disp[df_disp['REF_ARTICLE_SERTA'].astype(str).isin(f_ref)]
 if f_up:      df_disp = df_disp[df_disp['UP_PRINCIPALE'].astype(str).isin(f_up)]
 if f_prog:    df_disp = df_disp[df_disp['PROGRAMME'].astype(str).isin(f_prog)]
 if f_origine: df_disp = df_disp[df_disp['ORIGINE'].astype(str).isin(f_origine)]
-if 'DOUBLON' in df_disp.columns:
-    if f_doublon == 'Doublons uniquement':
-        df_disp = df_disp[df_disp['DOUBLON'] == True]
-    elif f_doublon == 'Sans doublons':
-        df_disp = df_disp[df_disp['DOUBLON'] == False]
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3 = st.tabs(["📋 Tableau pivot", "📈 Graphique", "💾 Export"])
@@ -259,7 +349,7 @@ with tab2:
     if wk_cols:
         totals = df_disp[wk_cols].sum()
         fig = px.bar(x=totals.index, y=totals.values,
-                     title="QTY totale consolidée par semaine (LPC + Carnet)",
+                     title="QTY totale consolidée par semaine (LPC + Carnet + Projet)",
                      labels={'x': 'Semaine', 'y': 'QTY'},
                      color_discrete_sequence=['#1F4E79'])
         st.plotly_chart(fig, width="stretch")

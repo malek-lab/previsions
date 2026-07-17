@@ -237,6 +237,43 @@ c4.metric("Semaines",                  len(wk_cols))
 if wk_cols:
     st.caption(f"📅 {wk_cols[0]} → {wk_cols[-1]}")
 
+# AJOUT : aller-retour telecharger / reimporter -- deplace ici (APRES les
+# metriques principales, dans un expander replie par defaut) plutot qu'en
+# toute premiere chose visible sur la page -- c'est une fonctionnalite
+# avancee/optionnelle, elle ne doit pas passer avant l'apercu general.
+with st.expander("📤 Éditer hors-ligne (optionnel) — télécharger, modifier dans Excel, réimporter"):
+    st.download_button(
+        "📥 Télécharger le tableau chargé",
+        data=to_excel_bytes(df_proj),
+        file_name=f"nouveaux_projets_{dt.date.today().strftime('%Y%m%d')}.xlsx",
+        help="Édite/complète une colonne dans Excel (ex: une quantité manquante), "
+             "puis réimporte le fichier ci-dessous pour qu'il remplace ce tableau."
+    )
+    st.markdown("")  # petit espace vertical entre les deux widgets
+    fichier_reimporte = st.file_uploader(
+        "📤 Réimporter le fichier modifié",
+        type=['xlsx'],
+        help="Remplace le tableau ci-dessus par la version que tu réimportes ici. "
+             "La page se rechargera automatiquement avec les nouvelles données."
+    )
+    if fichier_reimporte is not None:
+        try:
+            df_reimporte = pd.read_excel(fichier_reimporte)
+            for col in ['NUM_PROJET', 'REF_ARTICLE_SERTA', 'CODE_SELECTION', 'UP_PRINCIPALE',
+                        'BUSINESS_NAME', 'CODE_CLIENT', 'SERTA_SO_CLIENT_NAME',
+                        'SERTA_SO_CLIENT_GROUP_NAME', 'PROJECT_MANAGER', 'SALES_PERSON',
+                        'STATUT', 'ORIGINE']:
+                if col in df_reimporte.columns:
+                    df_reimporte[col] = df_reimporte[col].fillna('').astype(str)
+            for c in wk_cols_from_df(df_reimporte):
+                df_reimporte[c] = pd.to_numeric(df_reimporte[c], errors='coerce').fillna(0)
+            st.session_state['df_projets_raw'] = df_reimporte
+            st.success(f"✅ Fichier réimporté — {len(df_reimporte)} lignes. "
+                       f"Rechargement en cours...")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Erreur de lecture du fichier réimporté : {e}")
+
 st.markdown("---")
 
 # ── Section 1 : Nouvelles refs ────────────────────────────────────────────────
@@ -251,6 +288,12 @@ else:
     meta_pres = [c for c in META_PROJ if c in df_nouveaux.columns]
     st.dataframe(df_nouveaux[meta_pres + wk_pres], width='stretch', height=300,
                  column_config=col_cfg)
+    st.download_button(
+        "📥 Télécharger cette table (nouvelles refs)",
+        data=to_excel_bytes(df_nouveaux[meta_pres + wk_pres]),
+        file_name=f"nouveaux_projets_nouvelles_refs_{dt.date.today().strftime('%Y%m%d')}.xlsx",
+        key="dl_nouveaux"
+    )
 
 st.markdown("---")
 
@@ -262,21 +305,83 @@ if df_existants.empty:
     st.info("Aucune référence en doublon.")
     df_existants_sel = pd.DataFrame()
 else:
+    # AJOUT : bouton pour repartir de zero -- utile maintenant que l'appli
+    # tourne en service permanent (session_state peut rester vivant plusieurs
+    # jours si l'onglet navigateur n'est jamais ferme, gardant les cases
+    # GARDER cochees d'une fois sur l'autre sans que ce soit voulu).
+    if st.button("🔄 Réinitialiser la sélection (décoche tout)"):
+        if "editor_existants" in st.session_state:
+            del st.session_state["editor_existants"]
+        st.rerun()
+
+    # AJOUT : indicateur "deja integre precedemment" -- verifie si la ref
+    # existe deja dans st.session_state['df_projets_doublons'], qui n'est
+    # rempli que par un clic precedent sur "Integrer" (potentiellement une
+    # session anterieure, vu que l'appli tourne maintenant en service
+    # permanent). Sans cet indicateur, impossible de savoir si une case
+    # cochee vient d'une action d'aujourd'hui ou d'il y a plusieurs jours.
+    refs_deja_integrees = set()
+    _prev_doublons = st.session_state.get('df_projets_doublons', pd.DataFrame())
+    if not _prev_doublons.empty and 'REF_ARTICLE_SERTA' in _prev_doublons.columns:
+        refs_deja_integrees = set(_prev_doublons['REF_ARTICLE_SERTA'].astype(str))
+
     df_edit  = df_existants.copy()
     wk_pres_ex   = [c for c in wk_cols if c in df_edit.columns]
     meta_pres_ex = [c for c in META_PROJ if c in df_edit.columns]
     df_edit.insert(0, 'GARDER', False)
+    df_edit.insert(1, 'DEJA_INTEGRE',
+        df_edit['REF_ARTICLE_SERTA'].astype(str).isin(refs_deja_integrees)
+        .map({True: '⚠️ Session précédente', False: ''}))
     col_cfg_ex = {wk: st.column_config.NumberColumn(wk, format="%d") for wk in wk_pres_ex}
     col_cfg_ex['GARDER'] = st.column_config.CheckboxColumn("Garder ?", default=False)
+    col_cfg_ex['DEJA_INTEGRE'] = st.column_config.TextColumn(
+        "Déjà intégré ?", help="Indique si cette ref a déjà été intégrée lors d'un clic précédent sur 'Intégrer' (potentiellement une session antérieure)")
 
     edited = st.data_editor(
-        df_edit[['GARDER'] + meta_pres_ex + wk_pres_ex],
+        df_edit[['GARDER', 'DEJA_INTEGRE'] + meta_pres_ex + wk_pres_ex],
         column_config=col_cfg_ex,
         width='stretch',
         height=300,
         key="editor_existants"
     )
-    df_existants_sel = edited[edited['GARDER'] == True].drop(columns=['GARDER'])
+    df_existants_sel = edited[edited['GARDER'] == True].drop(columns=['GARDER', 'DEJA_INTEGRE'])
+    st.download_button(
+        "📥 Télécharger cette table (refs existantes)",
+        data=to_excel_bytes(edited),
+        file_name=f"nouveaux_projets_refs_existantes_{dt.date.today().strftime('%Y%m%d')}.xlsx",
+        key="dl_existants"
+    )
+
+# ── AJOUT : liste unifiee -- combine nouveaux + doublons coches, pour voir
+# d'un coup ce qui sera reellement integre, sans avoir a combiner mentalement
+# deux tableaux separes ────────────────────────────────────────────────────
+st.markdown("---")
+st.subheader("📋 Liste finale à intégrer (nouveaux + doublons cochés)")
+
+_liste_unifiee_parts = []
+if not df_nouveaux.empty:
+    _tmp = df_nouveaux.copy()
+    _tmp['TYPE'] = 'Nouveau'
+    _liste_unifiee_parts.append(_tmp)
+if not df_existants_sel.empty:
+    _tmp2 = df_existants_sel.copy()
+    _tmp2['TYPE'] = 'Doublon gardé'
+    _liste_unifiee_parts.append(_tmp2)
+
+if _liste_unifiee_parts:
+    df_liste_unifiee = pd.concat(_liste_unifiee_parts, ignore_index=True)
+    _meta_uni = [c for c in ['TYPE'] + META_PROJ if c in df_liste_unifiee.columns]
+    _wk_uni   = [c for c in wk_cols if c in df_liste_unifiee.columns]
+    st.dataframe(df_liste_unifiee[_meta_uni + _wk_uni], width='stretch', height=300)
+    st.download_button(
+        "📥 Télécharger la liste unifiée (ce qui sera intégré)",
+        data=to_excel_bytes(df_liste_unifiee[_meta_uni + _wk_uni]),
+        file_name=f"nouveaux_projets_liste_unifiee_{dt.date.today().strftime('%Y%m%d')}.xlsx",
+        key="dl_unifiee"
+    )
+else:
+    df_liste_unifiee = pd.DataFrame()
+    st.info("Rien à intégrer pour l'instant — aucune nouvelle ref, aucun doublon coché.")
 
 # ── Bouton intégrer ───────────────────────────────────────────────────────────
 st.markdown("---")
@@ -309,4 +414,19 @@ if st.button("✅ Intégrer dans la consolidée (page 04)", type="primary",
     else:
         st.session_state['df_projets_doublons'] = pd.DataFrame()
 
+    # AJOUT : journal detaille -- quelles refs precises ont ete ajoutees, pour
+    # tracabilite (sait exactement ce qui a ete integre, pas juste un compte).
+    _refs_nouveaux_liste  = df_nouveaux['REF_ARTICLE_SERTA'].tolist() if not df_nouveaux.empty and 'REF_ARTICLE_SERTA' in df_nouveaux.columns else []
+    _refs_doublons_liste  = df_existants_sel['REF_ARTICLE_SERTA'].tolist() if not df_existants_sel.empty and 'REF_ARTICLE_SERTA' in df_existants_sel.columns else []
+
     st.success(f"✅ {nb_a_integrer} projets prêts — allez sur la page **📊 Consolidée** pour finaliser et exporter.")
+    with st.expander("📝 Journal — références précises intégrées à cette étape"):
+        _lignes_journal = (
+            [{"Référence": r, "Type": "Nouveau"} for r in _refs_nouveaux_liste] +
+            [{"Référence": r, "Type": "Doublon gardé"} for r in _refs_doublons_liste]
+        )
+        if _lignes_journal:
+            st.caption(f"{len(_refs_nouveaux_liste)} nouvelle(s) + {len(_refs_doublons_liste)} doublon(s) gardé(s)")
+            st.dataframe(pd.DataFrame(_lignes_journal), width='stretch', height=300, hide_index=True)
+        else:
+            st.caption("Aucune référence intégrée.")

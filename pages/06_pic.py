@@ -22,6 +22,16 @@ with st.sidebar:
         "et modifié manuellement.\n\n"
         "👈 Lancez d'abord la page **📊 Consolidée** pour alimenter cette vue."
     )
+    st.markdown("---")
+    # AJOUT : filtre PDR/composants, absent jusqu'ici du PIC (existait deja
+    # en page 04 Consolidee). Meme principe : desactive par defaut, exclut
+    # les refs classees PDR/PFPDR/MAUNIT/MAJOIN (vrai CODE_GROUPE_ARTICLE).
+    filtrer_pdr_pic = st.checkbox(
+        "Filtrer les PDR/composants",
+        value=False,
+        help="Désactivé par défaut. Exclut les références classées "
+             "PDR/PFPDR/MAUNIT/MAJOIN (vrai CODE_GROUPE_ARTICLE) -- "
+             "même filtre que celui de la page Consolidée.")
 
 # ── Source ────────────────────────────────────────────────────────────────────
 source = st.radio(
@@ -38,11 +48,41 @@ def wk_to_month(label):
     except:
         return None
 
+# AJOUT : mapping explicite anglais->numero de mois, independant de la locale
+# systeme. dt.datetime.strptime(..., '%b-%y') depend de la langue configuree
+# sur le serveur -- si le systeme est en francais (janv./fevr. au lieu de
+# Jan/Feb), le parsing echoue SILENCIEUSEMENT (cache par le except: pass plus
+# bas), et tout le calcul de cutoff/trimestre ne se declenche jamais sans
+# aucun message d'erreur visible.
+MOIS_ABBREV_EN = {'Jan':1,'Feb':2,'Mar':3,'Apr':4,'May':5,'Jun':6,
+                   'Jul':7,'Aug':8,'Sep':9,'Oct':10,'Nov':11,'Dec':12}
+
+def parse_month_label(ml):
+    """Parse 'Jan-27' -> date(2027,1,1), sans dependance a la locale systeme."""
+    try:
+        abbrev, yy = ml.split('-')
+        mm = MOIS_ABBREV_EN[abbrev]
+        yyyy = 2000 + int(yy)
+        return dt.date(yyyy, mm, 1)
+    except (KeyError, ValueError):
+        return None
+
 def month_label(ym):
     try:
-        return dt.datetime.strptime(ym, '%Y-%m').strftime('%b-%y')
+        d = dt.datetime.strptime(ym, '%Y-%m')
+        abbrev = [k for k,v in MOIS_ABBREV_EN.items() if v == d.month][0]
+        return f"{abbrev}-{str(d.year)[2:]}"
     except:
         return ym
+
+def month_to_quarter_label(ym):
+    """'2026-07' -> 'Q3-26'"""
+    try:
+        d = dt.datetime.strptime(ym, '%Y-%m')
+        q = (d.month - 1) // 3 + 1
+        return f"Q{q}-{str(d.year)[2:]}"
+    except:
+        return None
 
 COL_GROUPE = 'SERTA_SO_CLIENT_GROUP_NAME'
 COL_PRIX   = 'PRIX_MOQ'
@@ -53,11 +93,18 @@ META_COLS = ['REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT', 'ORIGINE', 'UP_PRINCIPAL
              'SALES_ADMINISTRATION_PERSON', 'CODE_CLIENT', 'DOUBLON']
 
 if source.startswith("🔗"):
-    if 'df_consolide' not in st.session_state:
+    # CORRIGE : cette page lisait 'df_consolide', la cle que la page 04
+    # ecrivait AVANT le correctif de collision de session -- depuis ce
+    # correctif, la page 04 ecrit dans 'df_consolide_final' (pour ne plus
+    # ecraser le programme brut de la page 02, qui utilise aussi la cle
+    # 'df_consolide'). Sans cette mise a jour, le PIC lisait le programme
+    # brut fige, jamais enrichi par le carnet ni les projets -- d'ou
+    # l'absence totale de refs CARNET/PROJET observee dans les exports PIC.
+    if 'df_consolide_final' not in st.session_state:
         st.warning("⚠️ Lancez d'abord la page **📊 Consolidée** pour alimenter cette vue.")
         st.stop()
 
-    df_raw = st.session_state['df_consolide'].copy()
+    df_raw = st.session_state['df_consolide_final'].copy()
     wk_cols = wk_cols_from_df(df_raw)
 
     # Forcer numériques semaines
@@ -84,20 +131,46 @@ if source.startswith("🔗"):
     _date_prev = st.session_state.get('date_prevision', None)
     if _date_prev:
         _mois_prev = _date_prev.strftime('%Y-%m')
-        _ml_prev   = dt.datetime.strptime(_mois_prev, '%Y-%m').strftime('%b-%y')
+        _ml_prev   = month_label(_mois_prev)
+        _erreurs_parsing = []
         for _ml in mois_labels:
-            try:
-                _d = dt.datetime.strptime(_ml, '%b-%y')
-                if _d.strftime('%Y-%m') < _mois_prev:
-                    # Mois passés → 0
-                    df_pic[_ml] = 0
-                elif _ml == _ml_prev:
-                    # Mois cutoff → besoin encours uniquement
-                    _lpc_encours = pd.to_numeric(df_raw.get('QTE_BESOIN_CLIENT_ENCOURS',    0), errors='coerce').fillna(0)
-                    _sc_encours  = pd.to_numeric(df_raw.get('QTE_BESOIN_CLIENT_ENCOURS_SC', 0), errors='coerce').fillna(0)
-                    df_pic[_ml]  = pd.Series((_lpc_encours + _sc_encours).values).clip(lower=0).values
-            except:
-                pass
+            _d = parse_month_label(_ml)
+            if _d is None:
+                _erreurs_parsing.append(_ml)
+                continue
+            _ym = _d.strftime('%Y-%m')
+            if _ym < _mois_prev:
+                # Mois passés → 0
+                df_pic[_ml] = 0
+            elif _ml == _ml_prev:
+                # CORRIGE : le remplacement par l'encours ne doit s'appliquer
+                # qu'aux lignes qui touchent au CARNET -- avant, TOUTES les
+                # lignes (y compris LPC pur, sans commande ferme) etaient
+                # remplacees par l'encours, qui vaut 0 pour elles puisque ces
+                # colonnes viennent specifiquement du carnet. Consequence :
+                # toute prevision LPC pure sur le mois de cutoff se
+                # retrouvait mise a 0 a tort, alors qu'elle represente une
+                # vraie prevision programme, pas juste "pas de commande ferme".
+                _lpc_encours = pd.to_numeric(df_raw.get('QTE_BESOIN_CLIENT_ENCOURS',    0), errors='coerce').fillna(0)
+                _sc_encours  = pd.to_numeric(df_raw.get('QTE_BESOIN_CLIENT_ENCOURS_SC', 0), errors='coerce').fillna(0)
+                _encours_totale = pd.Series((_lpc_encours + _sc_encours).values).clip(lower=0).values
+
+                if 'ORIGINE' in df_raw.columns:
+                    _touche_carnet = df_raw['ORIGINE'].astype(str).str.contains('CARNET', na=False).values
+                    df_pic.loc[_touche_carnet, _ml] = _encours_totale[_touche_carnet]
+                    # Lignes LPC pures (sans CARNET) : la valeur du mois deja
+                    # calculee (prevision programme) reste inchangee.
+                else:
+                    # ORIGINE indisponible -- comportement precedent par defaut
+                    df_pic[_ml] = _encours_totale
+        # AJOUT : avertissement visible au lieu d'un echec silencieux
+        # (l'ancien code avait un except: pass qui masquait toute erreur de
+        # parsing, notamment le risque de locale systeme aborde plus haut)
+        if _erreurs_parsing:
+            st.warning(f"⚠️ {len(_erreurs_parsing)} libellé(s) de mois n'ont pas pu être "
+                       f"interprétés pour le cutoff : {_erreurs_parsing}")
+    else:
+        st.caption("ℹ️ Pas de cutoff mensuel appliqué (date_prevision non définie en page 01).")
 
     df_pic['TOTAL QTY'] = df_pic[mois_labels].sum(axis=1)
     st.success(f"✅ {len(df_pic)} lignes depuis la session")
@@ -127,6 +200,84 @@ else:
         st.stop()
 
 st.markdown("---")
+
+# AJOUT : filtre PDR/composants, applique ici -- avant le calcul des
+# trimestres pour que ceux-ci refletent aussi le filtre. Meme fonction/
+# logique que celle de la page Consolidee (echappement de quotes corrige,
+# lots de 100 refs, sans cache st.cache_data pour eviter les soucis
+# d'affichage UI dans une fonction cachee).
+if filtrer_pdr_pic and 'REF_ARTICLE_SERTA' in df_pic.columns:
+    from sqlalchemy import text as _text_pdr
+
+    def _charger_groupe_article_pic(refs_tuple):
+        engine = get_engine()
+        if engine is None or not refs_tuple:
+            return pd.DataFrame(columns=['REF_ARTICLE_SERTA', 'VRAI_GROUPE_ARTICLE'])
+        TAILLE_LOT = 100
+        lots = [refs_tuple[i:i+TAILLE_LOT] for i in range(0, len(refs_tuple), TAILLE_LOT)]
+        resultats = []
+        progress = st.progress(0, text="Vérification du groupe article...")
+        for i, lot in enumerate(lots):
+            refs_echappees = ["''" + r.replace("'", "''''") + "''" for r in lot]
+            refs_sql = ", ".join(refs_echappees)
+            try:
+                with engine.connect() as conn:
+                    df_lot = pd.read_sql(_text_pdr(f"""
+                        SELECT *
+                        FROM OPENQUERY([SRV-MSSQLDB], '
+                            SELECT REF_ARTICLE, CODE_GROUPE_ARTICLE
+                            FROM DW.PRODUCTION.V_ART_STANDARD
+                            WHERE REF_ARTICLE IN ({refs_sql})
+                        ')
+                    """), conn)
+                df_lot.columns = ['REF_ARTICLE_SERTA', 'VRAI_GROUPE_ARTICLE']
+                resultats.append(df_lot)
+            except Exception:
+                pass
+            progress.progress((i+1)/len(lots), text=f"Vérification groupe article... lot {i+1}/{len(lots)}")
+        progress.empty()
+        if not resultats:
+            return pd.DataFrame(columns=['REF_ARTICLE_SERTA', 'VRAI_GROUPE_ARTICLE'])
+        df_res = pd.concat(resultats, ignore_index=True)
+        df_res['REF_ARTICLE_SERTA'] = df_res['REF_ARTICLE_SERTA'].astype(str).str.strip()
+        return df_res.drop_duplicates('REF_ARTICLE_SERTA')
+
+    GROUPES_PDR_PIC = ['PDR', 'PFPDR', 'MAUNIT', 'MAJOIN']
+    refs_pic_tuple = tuple(sorted(df_pic['REF_ARTICLE_SERTA'].dropna().astype(str).str.strip().unique()))
+    df_groupe_pic = _charger_groupe_article_pic(refs_pic_tuple)
+    if not df_groupe_pic.empty:
+        nb_avant_pic = len(df_pic)
+        df_pic = df_pic.merge(df_groupe_pic, on='REF_ARTICLE_SERTA', how='left')
+        a_retirer_pic = df_pic['VRAI_GROUPE_ARTICLE'].isin(GROUPES_PDR_PIC)
+        nb_retirees_pic = a_retirer_pic.sum()
+        df_pic = df_pic[~a_retirer_pic].drop(columns=['VRAI_GROUPE_ARTICLE'])
+        if nb_retirees_pic > 0:
+            st.info(f"🧹 {nb_retirees_pic} ligne(s) retirée(s) (PDR/composants).")
+
+# AJOUT : agregation trimestrielle -- absente du fichier original, construite
+# a partir des colonnes mois deja calculees (meme logique, lundi de la
+# semaine ISO determine le mois, donc le trimestre par transitivite).
+trimestre_map = {}
+for ml in mois_labels:
+    d = parse_month_label(ml)
+    if d is None:
+        continue
+    ql = month_to_quarter_label(d.strftime('%Y-%m'))
+    if ql:
+        trimestre_map.setdefault(ql, []).append(ml)
+
+def _tri_sort_key(ql):
+    q, yy = ql.split('-')
+    return (int(yy), int(q[1]))
+trimestres_tries = sorted(trimestre_map.keys(), key=_tri_sort_key)
+
+for ql in trimestres_tries:
+    mois_du_trimestre = [m for m in trimestre_map[ql] if m in df_pic.columns]
+    df_pic[ql] = df_pic[mois_du_trimestre].sum(axis=1)
+
+if trimestres_tries:
+    st.caption(f"📅 Trimestres disponibles : {trimestres_tries[0]} → {trimestres_tries[-1]} "
+               f"({len(trimestres_tries)} trimestres)")
 
 # ── Filtre groupe client ──────────────────────────────────────────────────────
 if COL_GROUPE in df_pic.columns:
@@ -175,8 +326,8 @@ if mois_labels:
     st.caption(f"📅 {mois_labels[0]} → {mois_labels[-1]}")
 
 # ── Tableau ───────────────────────────────────────────────────────────────────
-col_cfg = {m: st.column_config.NumberColumn(m, format="%d") for m in mois_labels + ['TOTAL QTY']}
-cols_affich = [c for c in meta_pres if c in df_disp.columns] + mois_labels + ['TOTAL QTY']
+col_cfg = {m: st.column_config.NumberColumn(m, format="%d") for m in mois_labels + trimestres_tries + ['TOTAL QTY']}
+cols_affich = [c for c in meta_pres if c in df_disp.columns] + mois_labels + trimestres_tries + ['TOTAL QTY']
 st.caption(f"{len(df_disp):,} lignes")
 st.dataframe(df_disp[[c for c in cols_affich if c in df_disp.columns]],
              width='stretch', height=600, column_config=col_cfg)
@@ -223,7 +374,7 @@ st.download_button(
     data=buf.getvalue(),
     file_name=f"PIC_{_dt2.now().strftime('%Y%m%d_%H%M')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True
+    width='stretch'
 )
 
 # ── Sauvegarde SQL ────────────────────────────────────────────────────────────
@@ -233,7 +384,7 @@ col_sv1, col_sv2 = st.columns([3, 1])
 with col_sv1:
     commentaire = st.text_input("Commentaire", placeholder="ex: PIC Avril 2026 validé")
 with col_sv2:
-    btn_save = st.button("💾 Sauvegarder", type="primary", use_container_width=True)
+    btn_save = st.button("💾 Sauvegarder", type="primary", width='stretch')
 
 if btn_save:
     from sqlalchemy import text as _text

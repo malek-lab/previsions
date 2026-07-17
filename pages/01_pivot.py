@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, date
 from io import BytesIO
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
-from shared import get_engine, get_programmes, execute_procedure, logo_sidebar, wk_cols_from_df, to_excel_bytes, get_date_cache, recharger_cache, cache_disponible
+from shared import get_engine, get_programmes, execute_procedure, logo_sidebar, wk_cols_from_df, to_excel_bytes, get_date_cache, recharger_cache, cache_disponible, nettoyer_code, nettoyer_codes_dataframe
 
 st.markdown("""
 <style>
@@ -167,9 +167,15 @@ if btn_lancer:
 
     if df_res is not None and not df_res.empty:
         if 'NOM_FICHIER_PROGRAMME_CLIENT' in df_res.columns:
-            df_res['PROGRAMME'] = df_res['NOM_FICHIER_PROGRAMME_CLIENT']
+            # Réparer le programme dès la source (zéro initial perdu par SQL/pandas),
+            # AVANT toute extraction du code client -- c'est le point d'entrée unique
+            # du pipeline, donc réparer ici évite que l'erreur ne se propage partout.
+            df_res['NOM_FICHIER_PROGRAMME_CLIENT'] = df_res['NOM_FICHIER_PROGRAMME_CLIENT'].apply(
+                lambda v: nettoyer_code(v, longueur=4))
+            # Copie explicite et indépendante du programme complet (code client + année/semaine)
+            df_res['PROGRAMME'] = df_res['NOM_FICHIER_PROGRAMME_CLIENT'].copy()
             df_res['CODE_CLIENT'] = df_res['NOM_FICHIER_PROGRAMME_CLIENT'].apply(
-                lambda x: str(x).split('_')[0] if '_' in str(x) else '')
+                lambda x: nettoyer_code(str(x).split('_')[0] if '_' in str(x) else '', longueur=4))
             df_res = df_res.drop(columns=[c for c in [
                 'NOM_FICHIER_PROGRAMME_CLIENT', 'LIBELLE_SYSTEME_COMMANDE',
                 'DATE_BORN_GAUCHE', 'DATE_BORN_DROIT'] if c in df_res.columns])
@@ -255,6 +261,12 @@ with tab1:
     if 'PROGRAMME' in meta_disp:
         meta_disp = ['PROGRAMME'] + [c for c in meta_disp if c != 'PROGRAMME']
     col_cfg = {wk: st.column_config.NumberColumn(wk, format="%d") for wk in wk_cols}
+    # Forcer l'affichage en TEXTE pur pour les codes/identifiants, afin que
+    # Streamlit n'interprète jamais une colonne purement numérique en chiffre
+    # (et ne perde donc jamais le zéro initial, ex: "0555" -> "555")
+    for _c in ['PROGRAMME', 'CODE_CLIENT', 'REF_ARTICLE_SERTA', 'REF_ARTICLE_CLIENT', 'UP_PRINCIPALE', 'CODE_SELECTION']:
+        if _c in meta_disp:
+            col_cfg[_c] = st.column_config.TextColumn(_c)
     wk_disp = [c for c in wk_cols if c in df_disp.columns]
     st.caption(f"{len(df_disp):,} lignes")
     st.dataframe(df_disp[meta_disp + wk_disp], width='stretch', height=600,

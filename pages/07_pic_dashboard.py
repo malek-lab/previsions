@@ -23,15 +23,54 @@ with st.sidebar:
 COL_GROUPE = 'SERTA_SO_CLIENT_GROUP_NAME'
 COL_REF    = 'REF_ARTICLE_SERTA'
 
+# AJOUT : mapping explicite anglais->numero de mois, independant de la locale
+# systeme -- meme correctif que celui applique dans 06_pic.py. strptime/strftime
+# avec '%b-%y' echouent silencieusement (caches par des except: pass) si le
+# serveur est configure dans une langue non-anglaise.
+import datetime as _dtt
+MOIS_ABBREV_EN = {'Jan':1,'Feb':2,'Mar':3,'Apr':4,'May':5,'Jun':6,
+                   'Jul':7,'Aug':8,'Sep':9,'Oct':10,'Nov':11,'Dec':12}
+
+def _parse_month_label(ml):
+    try:
+        abbrev, yy = str(ml).split('-')
+        mm = MOIS_ABBREV_EN[abbrev]
+        return _dtt.date(2000 + int(yy), mm, 1)
+    except (KeyError, ValueError):
+        return None
+
+def _mlbl(ym):
+    try:
+        d = _dtt.datetime.strptime(ym, '%Y-%m')
+        abbrev = [k for k,v in MOIS_ABBREV_EN.items() if v == d.month][0]
+        return f"{abbrev}-{str(d.year)[2:]}"
+    except:
+        return ym
+
+def _msort(lbl):
+    d = _parse_month_label(lbl)
+    return _dtt.date(2099, 1, 1) if d is None else d
+
 # ── Source de données ─────────────────────────────────────────────────────────
-# Priorité : session PIC → session agrégation → SQL T_PIC_MENSUEL
+# CORRIGE : priorite reorganisee -- df_consolide_final (resultat de la page 04)
+# devient la source principale, PAS df_03 (page 03, avant consolidation).
+# Avant ce correctif, ce dashboard recalculait tout depuis df_03 directement,
+# ignorant totalement les choix faits en page 04 (case "Filtrer les
+# PDR/composants", case "Inclure les Nouveaux Projets") et sa logique de
+# consolidation/anti-doublon (calc_origine, combinaison LPC/CARNET...) --
+# les chiffres du dashboard pouvaient donc diverger silencieusement de ceux
+# du Consolide et du PIC Mensuel, sans lien avec les reglages choisis.
 if 'df_pic' in st.session_state:
     df_pic     = st.session_state['df_pic'].copy()
     mois_tries = st.session_state.get('df_pic_mois', [])
-elif 'df_03' in st.session_state:
-    # Recalculer depuis df_03 directement
-    import datetime as _dtt
-    df_raw = st.session_state['df_03'].copy()
+elif 'df_consolide_final' in st.session_state or 'df_03' in st.session_state:
+    if 'df_consolide_final' in st.session_state:
+        df_raw = st.session_state['df_consolide_final'].copy()
+        _source_msg = "la page **Consolidée** (reflète vos filtres PDR/Projets)"
+    else:
+        df_raw = st.session_state['df_03'].copy()
+        _source_msg = "**df_03** (Agrégation) -- lancez la page **Consolidée** pour refléter vos filtres PDR/Projets"
+
     wk_raw = [c for c in df_raw.columns if isinstance(c,str) and len(c)==6
               and c[0]=='S' and c[3]=='-' and c[1:3].isdigit() and c[4:6].isdigit()]
     def _wk2m(lbl):
@@ -39,9 +78,6 @@ elif 'df_03' in st.session_state:
             yy,ww = int('20'+lbl[1:3]), int(lbl[4:6])
             return _dtt.date.fromisocalendar(yy,ww,1).strftime('%Y-%m')
         except: return None
-    def _mlbl(ym):
-        try: return _dtt.datetime.strptime(ym,'%Y-%m').strftime('%b-%y')
-        except: return ym
     mois_map = {}
     for wk in wk_raw:
         m = _wk2m(wk)
@@ -64,7 +100,7 @@ elif 'df_03' in st.session_state:
             qty = float(grp[wks].sum().sum()) if wks else 0
             rows.append({**base,'MOIS':mois,'MOIS_LABEL':_mlbl(mois),'QTY':qty,'CA':round(qty*prix,2)})
     df_pic = pd.DataFrame(rows)
-    st.info("ℹ️ Données calculées depuis la session Agrégation — allez sur **PIC Mensuel** pour personnaliser.")
+    st.info(f"ℹ️ Données calculées depuis {_source_msg}.")
 else:
     # Charger depuis SQL
     try:
@@ -79,9 +115,7 @@ else:
         if 'ANNEE_MOIS' in df_pic.columns and 'MOIS' not in df_pic.columns:
             df_pic['MOIS'] = df_pic['ANNEE_MOIS']
         if 'MOIS_LABEL' not in df_pic.columns and 'MOIS' in df_pic.columns:
-            import datetime as _dtt2
-            df_pic['MOIS_LABEL'] = df_pic['MOIS'].apply(
-                lambda x: _dtt2.datetime.strptime(str(x),'%Y-%m').strftime('%b-%y') if x else '')
+            df_pic['MOIS_LABEL'] = df_pic['MOIS'].apply(lambda x: _mlbl(str(x)) if x else '')
         st.info(f"ℹ️ Données chargées depuis T_PIC_MENSUEL — {len(df_pic):,} lignes")
     except Exception as e:
         st.warning(f"⚠️ Aucune donnée disponible. Lancez d'abord la page **📅 PIC Mensuel** ou vérifiez la table T_PIC_MENSUEL. ({e})")
@@ -103,10 +137,6 @@ with st.sidebar:
             df_pic = df_pic[df_pic[COL_GROUPE].astype(str).isin(f_grp)]
 
     if 'MOIS_LABEL' in df_pic.columns:
-        from datetime import datetime as _dtt3
-        def _msort(lbl):
-            try: return _dtt3.strptime(lbl,'%b-%y')
-            except: return _dtt3(2099,1,1)
         mois_dispo = sorted(df_pic['MOIS_LABEL'].dropna().unique(), key=_msort)
         f_mois = st.multiselect("📅 Mois", options=mois_dispo, default=mois_dispo,
                                  key="dash_mois")
@@ -140,7 +170,7 @@ with col_g1:
         )
         fig_donut.update_traces(textposition='inside', textinfo='percent+label')
         fig_donut.update_layout(showlegend=True, height=400)
-        st.plotly_chart(fig_donut, use_container_width=True)
+        st.plotly_chart(fig_donut, width='stretch')
 
 # Pie — Turnover / CA
 with col_g2:
@@ -154,19 +184,15 @@ with col_g2:
         )
         fig_pie.update_traces(textposition='inside', textinfo='percent+label')
         fig_pie.update_layout(showlegend=True, height=400)
-        st.plotly_chart(fig_pie, use_container_width=True)
+        st.plotly_chart(fig_pie, width='stretch')
 
 st.markdown("---")
 
 # Bar — QTY par mois (empilé par groupe client)
 if COL_GROUPE in df_pic.columns and 'MOIS_LABEL' in df_pic.columns:
     df_bar_qty = df_pic.groupby([COL_GROUPE, 'MOIS_LABEL'])['QTY'].sum().reset_index()
-    # Trier les mois chronologiquement
-    from datetime import datetime as _dtt
-    def mois_sort_key(label):
-        try: return _dtt.strptime(label, '%b-%y')
-        except: return _dtt(2099, 1, 1)
-    mois_sorted = sorted(df_bar_qty['MOIS_LABEL'].unique(), key=mois_sort_key)
+    # Trier les mois chronologiquement (fonction _msort deja definie en haut du fichier)
+    mois_sorted = sorted(df_bar_qty['MOIS_LABEL'].unique(), key=_msort)
     df_bar_qty['MOIS_LABEL'] = pd.Categorical(df_bar_qty['MOIS_LABEL'], categories=mois_sorted, ordered=True)
     df_bar_qty = df_bar_qty.sort_values('MOIS_LABEL')
 
@@ -178,7 +204,7 @@ if COL_GROUPE in df_pic.columns and 'MOIS_LABEL' in df_pic.columns:
         labels={'MOIS_LABEL': 'Mois', 'QTY': 'Quantité', COL_GROUPE: 'Groupe client'}
     )
     fig_qty.update_layout(height=450, xaxis_tickangle=-45)
-    st.plotly_chart(fig_qty, use_container_width=True)
+    st.plotly_chart(fig_qty, width='stretch')
 
 # Bar — CA par mois (empilé par groupe client)
 if 'CA' in df_pic.columns and COL_GROUPE in df_pic.columns:
@@ -194,7 +220,7 @@ if 'CA' in df_pic.columns and COL_GROUPE in df_pic.columns:
         labels={'MOIS_LABEL': 'Mois', 'CA': 'CA (€)', COL_GROUPE: 'Groupe client'}
     )
     fig_ca.update_layout(height=450, xaxis_tickangle=-45)
-    st.plotly_chart(fig_ca, use_container_width=True)
+    st.plotly_chart(fig_ca, width='stretch')
 
 st.markdown("---")
 
