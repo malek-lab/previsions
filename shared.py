@@ -26,7 +26,6 @@ def get_programmes():
         return pd.DataFrame()
     try:
         with engine.connect() as conn:
-            # Utiliser T_CACHE_PROGRAMMES (cache local) si disponible
             df = pd.read_sql(text("""
                 SELECT FPC_ID, Programme, CLI_CODE, CLI_NOM,
                        Horizon_programme,
@@ -38,7 +37,6 @@ def get_programmes():
                 return df
     except:
         pass
-    # Fallback sur Programme_VW si cache vide
     try:
         with engine.connect() as conn:
             return pd.read_sql(text("""
@@ -86,7 +84,6 @@ def recharger_cache():
         with engine.connect() as conn:
             conn.execute(text("EXEC [dbo].[P_CACHE_NUIT]"))
             conn.commit()
-        # Vider le cache Streamlit de la liste des programmes
         get_programmes.clear()
         return True
     except Exception as e:
@@ -95,45 +92,34 @@ def recharger_cache():
 
 
 def _forcer_programme_texte(df):
-    """Force NOM_FICHIER_PROGRAMME_CLIENT en texte pur, dès la sortie SQL,
-    pour empêcher toute réinterprétation numérique du code client (perte du 0 initial,
-    ex: "0388_2626" -> 388_2626)."""
     if df is not None and not df.empty and 'NOM_FICHIER_PROGRAMME_CLIENT' in df.columns:
         df['NOM_FICHIER_PROGRAMME_CLIENT'] = df['NOM_FICHIER_PROGRAMME_CLIENT'].astype(str).str.strip()
     return df
 
 
 def nettoyer_code(valeur, longueur=4):
-
     if valeur is None:
         return ''
     code = str(valeur).strip()
-    # Retirer le suffixe ".0" parasite ajouté par une conversion numérique implicite
     if code.endswith('.0'):
         code = code[:-2]
-    # Si le code contient un séparateur (ex: "388_2626"), ne traiter QUE la partie
-    # avant le premier underscore, et laisser le reste tel quel
     if '_' in code:
         partie_code, reste = code.split('_', 1)
         if partie_code.isdigit() and len(partie_code) < longueur:
             partie_code = partie_code.zfill(longueur)
         return partie_code + '_' + reste
-    # Sinon, recompléter le zéro initial si c'est un nombre pur trop court
     if code.isdigit() and len(code) < longueur:
         code = code.zfill(longueur)
     return code
 
 
 def nettoyer_codes_dataframe(df, colonnes, longueur=4):
-    """Applique nettoyer_code() sur une liste de colonnes d'un DataFrame, en place.
-    Retourne le DataFrame modifié. Ignore silencieusement les colonnes absentes."""
     for col in colonnes:
         if col in df.columns:
             df[col] = df[col].apply(lambda v: nettoyer_code(v, longueur))
     return df
 
 def execute_procedure_single(fpc_id, date_prevision, date_ventilation, source_lot, activer_ventilation=True):
-    """Appel procédure pour UN SEUL programme (FPC_ID unique)."""
     engine = get_engine()
     if engine is None:
         return None
@@ -156,9 +142,6 @@ def execute_procedure_single(fpc_id, date_prevision, date_ventilation, source_lo
         return None
 
 def execute_procedure(fpc_ids, date_prevision, date_ventilation, source_lot, activer_ventilation=True):
-    """
-    Appel procédure vectorisée si cache dispo, sinon séquentiel.
-    """
     if not fpc_ids:
         return None
     engine = get_engine()
@@ -203,7 +186,6 @@ def execute_procedure(fpc_ids, date_prevision, date_ventilation, source_lot, act
             if not frames:
                 return None
             df_all = pd.concat(frames, ignore_index=True, sort=False)
-
             df_all = _forcer_programme_texte(df_all)
             wk = [c for c in df_all.columns
                   if isinstance(c, str) and len(c) == 6 and c[0] == 'S' and c[3] == '-'
@@ -221,7 +203,6 @@ def execute_procedure(fpc_ids, date_prevision, date_ventilation, source_lot, act
 
 @st.cache_data(ttl=3600)
 def get_historique_ventes(annee_min=None):
-
     engine = get_engine()
     if engine is None:
         return pd.DataFrame()
@@ -276,7 +257,6 @@ def get_historique_ventes(annee_min=None):
         if df.empty:
             return df
         df = nettoyer_codes_dataframe(df, ['CLIENT_CODE', 'ITEM_CODE'], longueur=4)
-
         for col in ['CLIENT_NAME', 'CLIENT_GROUP_NAME']:
             if col in df.columns:
                 df[col] = df[col].fillna('').astype(str).str.strip()
@@ -291,29 +271,22 @@ def get_historique_ventes(annee_min=None):
 
 
 def debut_premiere_semaine_mois(d):
-
     premier = d.replace(day=1)
-    # isoweekday(): lundi=1 ... dimanche=7 -> on recule jusqu'au lundi
     return premier - timedelta(days=premier.isoweekday() - 1)
 
 
 def plafond_arc(today=None):
-
     if today is None:
         today = date.today()
     base = date(2027, 12, 31)
     try:
         plus_un_an = today.replace(year=today.year + 1)
-    except ValueError:  # 29 février
+    except ValueError:
         plus_un_an = today.replace(year=today.year + 1, day=28)
     return max(base, plus_un_an)
 
 
 def wk_label_to_date(label):
-    """Convertit une étiquette de semaine ISO ('S26-28') en date du LUNDI de
-    cette semaine. Fonction dupliquée localement dans plusieurs pages jusqu'ici
-    (03_Agregation.py, 06_pic.py...) -- centralisée ici pour éviter toute
-    divergence future entre les copies."""
     try:
         yy = 2000 + int(label[1:3])
         ww = int(label[4:6])
@@ -323,32 +296,22 @@ def wk_label_to_date(label):
 
 
 def repartir_semaine_jours_ouvres(label):
-    
     lundi = wk_label_to_date(label)
     if lundi is None:
         return {}
-
-    jours_ouvres = [lundi + timedelta(days=i) for i in range(5)]  # lundi a vendredi
+    jours_ouvres = [lundi + timedelta(days=i) for i in range(5)]
     repartition = {}
     for j in jours_ouvres:
         mois = j.strftime('%Y-%m')
         repartition[mois] = repartition.get(mois, 0) + 1
-
-    total_jours = len(jours_ouvres)  # toujours 5
+    total_jours = len(jours_ouvres)
     return {mois: nb / total_jours for mois, nb in repartition.items()}
 
 
 def agreger_semaines_vers_mois_proportionnel(df, wk_cols):
-    """
-    Agrège les colonnes semaine vers des colonnes mois, en répartissant CHAQUE
-    semaine au prorata des jours ouvrés entre les mois qu'elle chevauche (voir
-    repartir_semaine_jours_ouvres). Alternative plus précise à la convention
-    "mois du lundi" utilisée par défaut ailleurs dans le pipeline.
-    """
     resultat = df.drop(columns=wk_cols).copy()
     mois_vus = set()
-    contributions = {}  # mois -> Series de quantites a sommer
-
+    contributions = {}
     for wk in wk_cols:
         if wk not in df.columns:
             continue
@@ -361,7 +324,6 @@ def agreger_semaines_vers_mois_proportionnel(df, wk_cols):
                 contributions[mois] = contributions[mois] + contribution
             else:
                 contributions[mois] = contribution
-
     for mois in sorted(mois_vus):
         resultat[mois] = contributions[mois]
     return resultat
@@ -371,16 +333,12 @@ def reequilibrer_semaines_avance_retard(df, wk_cols_apres_cutoff, df_hist,
                                           col_client='CODE_CLIENT', col_ref='REF_ARTICLE_SERTA',
                                           col_client_hist='CLIENT_CODE', col_ref_hist='ITEM_CODE',
                                           aujourdhui=None):
-   
     if df_hist is None or df_hist.empty or not wk_cols_apres_cutoff:
         return df
     if aujourdhui is None:
         aujourdhui = date.today()
-
     if col_client_hist not in df_hist.columns or col_ref_hist not in df_hist.columns:
-
         return df
-
     dfh = df_hist.copy()
     dfh[col_client_hist] = dfh[col_client_hist].astype(str).str.strip()
     dfh[col_ref_hist]    = dfh[col_ref_hist].astype(str).str.strip()
@@ -397,11 +355,8 @@ def reequilibrer_semaines_avance_retard(df, wk_cols_apres_cutoff, df_hist,
         dfh.groupby([col_client_hist, col_ref_hist, 'SEMAINE_FACTURE'])['QTE']
         .sum().to_dict()
     )
-
-
     semaine_passee = {wk: (wk_label_to_date(wk) or date(2099, 1, 1)) <= aujourdhui
                        for wk in wk_cols_apres_cutoff}
-
     ajuste = df.copy()
     ajuste[col_client] = ajuste[col_client].astype(str).str.strip()
     ajuste[col_ref]    = ajuste[col_ref].astype(str).str.strip()
@@ -409,18 +364,15 @@ def reequilibrer_semaines_avance_retard(df, wk_cols_apres_cutoff, df_hist,
     for idx in ajuste.index:
         cc  = ajuste.at[idx, col_client]
         ref = ajuste.at[idx, col_ref]
-        report = 0  # ecart signe cumule : positif = retard (a ajouter), negatif = avance (a retirer)
+        report = 0
         for i, wk in enumerate(wk_cols_apres_cutoff):
             prevu_semaine = ajuste.at[idx, wk]
             prevu_restant = max(0, prevu_semaine + report)
-
             if semaine_passee[wk]:
-    
                 facture_reel = facture_par_semaine.get((cc, ref, wk), 0)
                 ajuste.at[idx, wk] = facture_reel
                 report = prevu_restant - facture_reel
             else:
-
                 ajuste.at[idx, wk] = prevu_restant
                 report = 0
     return ajuste
@@ -441,7 +393,6 @@ def wk_cols_from_df(df):
 def to_excel_bytes(df):
     from io import BytesIO
     buf = BytesIO()
-
     df_export = df.copy()
     wk_cols = [c for c in df_export.columns
                if isinstance(c, str) and len(c) == 6 and c[0] == 'S' and c[3] == '-'

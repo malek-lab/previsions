@@ -1,3 +1,24 @@
+
+# ============================================================================
+import sys
+
+if sys.platform.startswith("win"):
+    from asyncio.proactor_events import _ProactorBasePipeTransport
+
+    _base_call_connection_lost = _ProactorBasePipeTransport._call_connection_lost
+
+    def _silent_call_connection_lost(self, exc):
+        try:
+            _base_call_connection_lost(self, exc)
+        except ConnectionResetError:
+            # Connexion déjà fermée par le client -- rien à faire, on ignore.
+            pass
+
+    _ProactorBasePipeTransport._call_connection_lost = _silent_call_connection_lost
+
+# ============================================================================
+# Le reste de app.py, inchangé
+# ============================================================================
 import streamlit as st
 
 st.set_page_config(page_title="SERTA — Outils", page_icon="📊", layout="wide")
